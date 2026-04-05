@@ -1284,8 +1284,9 @@ function registerTreeCommands(context, fileService) {
             placeHolder: `${slug}-copy`,
             value: `${slug}-copy`
         });
-        if (!newSlug)
+        if (!newSlug) {
             return;
+        }
         const newExpert = { ...result.data, slug: newSlug, role: `${result.data.role} (Copy)` };
         const createResult = await fileService.createExpert(newExpert);
         if (createResult.success) {
@@ -12616,6 +12617,7 @@ Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.openExpertManager = openExpertManager;
 const vscode = __importStar(__webpack_require__(1));
 const ExpertManagerService_1 = __webpack_require__(88);
+const webview_1 = __webpack_require__(86);
 let currentPanel;
 function openExpertManager(extensionUri, expertSlug) {
     if (currentPanel) {
@@ -12634,8 +12636,9 @@ function openExpertManager(extensionUri, expertSlug) {
     // Handle messages from webview
     currentPanel.webview.onDidReceiveMessage(async (message) => {
         const panel = currentPanel;
-        if (!panel)
+        if (!panel) {
             return;
+        }
         switch (message.command) {
             case 'init':
                 await handleInit(panel, expertSlug);
@@ -12761,8 +12764,9 @@ async function handleDuplicate(panel, slug) {
             return validation.valid ? null : validation.error;
         }
     });
-    if (!newSlug)
+    if (!newSlug) {
         return;
+    }
     const result = await ExpertManagerService_1.expertManagerService.duplicateExpert(slug, newSlug);
     if (result.success) {
         vscode.window.showInformationMessage(`Expert duplicated as "${newSlug}"`);
@@ -12821,9 +12825,8 @@ async function handleValidateSlug(panel, slug, originalSlug) {
 // ==========================================================================
 // HTML Generation
 // ==========================================================================
-function getHtml(webview, extensionUri) {
-    const { getNonce } = __webpack_require__(86);
-    const nonce = getNonce();
+function getHtml(_webview, _extensionUri) {
+    const nonce = (0, webview_1.getNonce)();
     return `<!DOCTYPE html>
 <html lang="en">
 <head>
