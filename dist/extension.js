@@ -52,6 +52,7 @@ const FileService_1 = __webpack_require__(3);
 const VisualizationService_1 = __webpack_require__(80);
 const TeamBuilderPanel_1 = __webpack_require__(81);
 const ExpertManager_1 = __webpack_require__(87);
+const DomainSettings_1 = __webpack_require__(89);
 const webview_1 = __webpack_require__(86);
 let treeProvider;
 let currentDashboardPanel;
@@ -70,7 +71,12 @@ function activate(context) {
         vscode.commands.registerCommand('agentManager.createExpert', () => createExpert(fileServiceInstance)),
         vscode.commands.registerCommand('agentManager.buildTeam', () => buildTeam(fileServiceInstance)),
         vscode.commands.registerCommand('agentManager.editAgent', () => editAgent(fileServiceInstance)),
-        vscode.commands.registerCommand('agentManager.openSettings', () => openSettings(fileServiceInstance)),
+        vscode.commands.registerCommand('agentManager.openSettings', () => {
+            const workspaceFolders = vscode.workspace.workspaceFolders;
+            if (workspaceFolders && workspaceFolders.length > 0) {
+                openDomainSettings(workspaceFolders[0].uri);
+            }
+        }),
         vscode.commands.registerCommand('agentManager.refreshTree', () => treeProvider.refresh()),
         vscode.commands.registerCommand('agentManager.viewTeamDiagram', (teamSlug) => viewTeamDiagram(fileServiceInstance, teamSlug)),
         vscode.commands.registerCommand('agentManager.viewExpertDiagram', (expertSlug) => viewExpertDiagram(fileServiceInstance, expertSlug)),
@@ -225,16 +231,16 @@ async function editAgent(fileService, expertSlug) {
     }
 }
 async function openSettings(fileService) {
-    const config = await fileService.readDomainConfig();
-    if (config.success && config.data) {
-        vscode.window.showInformationMessage(`Domain: ${config.data.domain}, Project: ${config.data.project_name}`);
+    const workspaceFolders = vscode.workspace.workspaceFolders;
+    if (workspaceFolders && workspaceFolders.length > 0) {
+        openDomainSettings(workspaceFolders[0].uri);
     }
     else {
-        const action = await vscode.window.showWarningMessage('Relay plugin not configured. Would you like to set it up?', 'Setup Now', 'Cancel');
-        if (action === 'Setup Now') {
-            vscode.window.showInformationMessage('Please run /relay:setup in the chat to configure relay plugin.');
-        }
+        vscode.window.showWarningMessage('Please open a workspace first.');
     }
+}
+function openDomainSettings(extensionUri) {
+    (0, DomainSettings_1.openDomainSettings)(extensionUri);
 }
 async function viewTeamDiagram(fileService, teamSlug) {
     const result = await fileService.readTeam(teamSlug);
@@ -14190,6 +14196,1058 @@ class ExpertManagerService {
 exports.ExpertManagerService = ExpertManagerService;
 // Singleton export
 exports.expertManagerService = new ExpertManagerService();
+
+
+/***/ }),
+/* 89 */
+/***/ (function(__unused_webpack_module, exports, __webpack_require__) {
+
+
+/**
+ * DomainSettings - Webview panel for domain and project configuration
+ *
+ * Features:
+ * - Domain selection (general/development)
+ * - Project name configuration
+ * - Active packs management
+ */
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.openDomainSettings = openDomainSettings;
+const vscode = __importStar(__webpack_require__(1));
+const ConfigService_1 = __webpack_require__(90);
+const webview_1 = __webpack_require__(86);
+let currentPanel;
+function openDomainSettings(extensionUri) {
+    if (currentPanel) {
+        currentPanel.reveal();
+        return;
+    }
+    currentPanel = vscode.window.createWebviewPanel('domainSettings', 'Domain Settings', vscode.ViewColumn.One, {
+        enableScripts: true,
+        retainContextWhenHidden: true,
+        localResourceRoots: [extensionUri]
+    });
+    currentPanel.webview.html = getHtml(currentPanel.webview);
+    currentPanel.onDidDispose(() => {
+        currentPanel = undefined;
+    });
+    currentPanel.webview.onDidReceiveMessage(async (message) => {
+        const panel = currentPanel;
+        if (!panel) {
+            return;
+        }
+        switch (message.command) {
+            case 'init':
+                await handleInit(panel);
+                break;
+            case 'saveDomain':
+                await handleSaveDomain(panel, message.domain);
+                break;
+            case 'saveProjectName':
+                await handleSaveProjectName(panel, message.name);
+                break;
+            case 'addPack':
+                await handleAddPack(panel, message.pack);
+                break;
+            case 'removePack':
+                await handleRemovePack(panel, message.pack);
+                break;
+        }
+    }, undefined);
+}
+async function handleInit(panel) {
+    const config = await ConfigService_1.configService.getDomainConfig();
+    const structure = await ConfigService_1.configService.checkRelayStructure();
+    panel.webview.postMessage({
+        command: 'loadConfig',
+        data: {
+            config: config.data,
+            structure: structure.data
+        }
+    });
+}
+async function handleSaveDomain(panel, domain) {
+    const result = await ConfigService_1.configService.setDomain(domain);
+    if (result.success) {
+        vscode.window.showInformationMessage(`Domain set to: ${domain}`);
+        await handleInit(panel);
+    }
+    else {
+        vscode.window.showErrorMessage(`Failed to set domain: ${result.error}`);
+    }
+}
+async function handleSaveProjectName(panel, name) {
+    const result = await ConfigService_1.configService.setProjectName(name);
+    if (result.success) {
+        vscode.window.showInformationMessage(`Project name set to: ${name}`);
+        await handleInit(panel);
+    }
+    else {
+        vscode.window.showErrorMessage(`Failed to set project name: ${result.error}`);
+    }
+}
+async function handleAddPack(panel, pack) {
+    const result = await ConfigService_1.configService.addActivePack(pack);
+    if (result.success) {
+        vscode.window.showInformationMessage(`Added pack: ${pack}`);
+        await handleInit(panel);
+    }
+    else {
+        vscode.window.showErrorMessage(`Failed to add pack: ${result.error}`);
+    }
+}
+async function handleRemovePack(panel, pack) {
+    const result = await ConfigService_1.configService.removeActivePack(pack);
+    if (result.success) {
+        vscode.window.showInformationMessage(`Removed pack: ${pack}`);
+        await handleInit(panel);
+    }
+    else {
+        vscode.window.showErrorMessage(`Failed to remove pack: ${result.error}`);
+    }
+}
+function getHtml(webview) {
+    const nonce = (0, webview_1.getNonce)();
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'nonce-${nonce}'; style-src 'unsafe-inline';">
+  <title>Domain Settings</title>
+  <style>
+    :root {
+      --bg-primary: var(--vscode-editor-background);
+      --bg-secondary: var(--vscode-editorWidget-background);
+      --fg-primary: var(--vscode-editor-foreground);
+      --fg-secondary: var(--vscode-descriptionForeground);
+      --border: var(--vscode-panel-border);
+      --button-bg: var(--vscode-button-background);
+      --button-fg: var(--vscode-button-foreground);
+      --input-bg: var(--vscode-input-background);
+      --input-border: var(--vscode-input-border);
+    }
+
+    body {
+      font-family: var(--vscode-font-family);
+      background: var(--bg-primary);
+      color: var(--fg-primary);
+      padding: 20px;
+      max-width: 800px;
+      margin: 0 auto;
+    }
+
+    h1 {
+      font-size: 24px;
+      margin-bottom: 8px;
+    }
+
+    h2 {
+      font-size: 18px;
+      margin-top: 24px;
+      margin-bottom: 12px;
+      padding-bottom: 8px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .section {
+      margin-bottom: 24px;
+    }
+
+    .info-card {
+      background: var(--bg-secondary);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 16px;
+      margin-bottom: 16px;
+    }
+
+    .info-row {
+      display: flex;
+      justify-content: space-between;
+      padding: 8px 0;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .info-row:last-child {
+      border-bottom: none;
+    }
+
+    .info-label {
+      color: var(--fg-secondary);
+    }
+
+    .info-value {
+      font-weight: 600;
+    }
+
+    .domain-options {
+      display: flex;
+      gap: 16px;
+      margin-top: 12px;
+    }
+
+    .domain-option {
+      flex: 1;
+      padding: 16px;
+      border: 2px solid var(--border);
+      border-radius: 8px;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .domain-option:hover {
+      border-color: var(--button-bg);
+    }
+
+    .domain-option.selected {
+      border-color: var(--button-bg);
+      background: rgba(0, 120, 212, 0.1);
+    }
+
+    .domain-option h3 {
+      margin: 0 0 8px 0;
+      font-size: 16px;
+    }
+
+    .domain-option p {
+      margin: 0;
+      font-size: 13px;
+      color: var(--fg-secondary);
+    }
+
+    input[type="text"] {
+      width: 100%;
+      padding: 8px 12px;
+      background: var(--input-bg);
+      border: 1px solid var(--input-border);
+      border-radius: 4px;
+      color: var(--fg-primary);
+      font-size: 14px;
+      margin-top: 8px;
+    }
+
+    button {
+      padding: 8px 16px;
+      background: var(--button-bg);
+      color: var(--button-fg);
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 14px;
+      margin-top: 12px;
+    }
+
+    button:hover {
+      opacity: 0.9;
+    }
+
+    .packs-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 12px;
+    }
+
+    .pack-tag {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 12px;
+      background: var(--bg-secondary);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      font-size: 13px;
+    }
+
+    .pack-tag button {
+      padding: 2px 6px;
+      margin: 0;
+      background: transparent;
+      color: var(--fg-secondary);
+      font-size: 12px;
+    }
+
+    .pack-tag button:hover {
+      color: #f44336;
+    }
+
+    .add-pack-form {
+      display: flex;
+      gap: 8px;
+      margin-top: 12px;
+    }
+
+    .add-pack-form input {
+      flex: 1;
+      margin-top: 0;
+    }
+
+    .add-pack-form button {
+      margin-top: 0;
+    }
+
+    .status-ok {
+      color: #4caf50;
+    }
+
+    .status-warning {
+      color: #ff9800;
+    }
+
+    .status-error {
+      color: #f44336;
+    }
+  </style>
+</head>
+<body>
+  <h1>🌐 Domain Settings</h1>
+  <p>Configure your relay-plugin domain and project settings.</p>
+
+  <div class="section">
+    <h2>📁 Project Info</h2>
+    <div class="info-card" id="projectInfo">
+      <div class="info-row">
+        <span class="info-label">Relay Status</span>
+        <span class="info-value" id="relayStatus">Loading...</span>
+      </div>
+      <div class="info-row">
+        <span class="info-label">Experts Count</span>
+        <span class="info-value" id="expertsCount">-</span>
+      </div>
+      <div class="info-row">
+        <span class="info-label">Teams Count</span>
+        <span class="info-value" id="teamsCount">-</span>
+      </div>
+      <div class="info-row">
+        <span class="info-label">Relay Root</span>
+        <span class="info-value" id="relayRoot" style="font-size: 12px;">-</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <h2>🎯 Domain Selection</h2>
+    <p>Choose the domain for your project. This determines which skills and agents are available.</p>
+    <div class="domain-options">
+      <div class="domain-option" data-domain="general" onclick="selectDomain('general')">
+        <h3>🌍 General</h3>
+        <p>Marketing, legal, planning, sales, and general business tasks.</p>
+        <p><strong>Packs:</strong> moai-foundation, business-writing</p>
+      </div>
+      <div class="domain-option" data-domain="development" onclick="selectDomain('development')">
+        <h3>💻 Development</h3>
+        <p>Software development teams with TDD, DDD, and code review skills.</p>
+        <p><strong>Packs:</strong> moai-foundation, tdd, ddd, code-review</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <h2>📝 Project Name</h2>
+    <input type="text" id="projectName" placeholder="Enter project name" />
+    <button onclick="saveProjectName()">Save Project Name</button>
+  </div>
+
+  <div class="section">
+    <h2>📦 Active Packs</h2>
+    <p>Additional skill packs to enable for this project.</p>
+    <div class="packs-list" id="packsList">
+      <!-- Packs will be loaded here -->
+    </div>
+    <div class="add-pack-form">
+      <input type="text" id="newPack" placeholder="Enter pack name (e.g., tdd, ddd, api-design)" />
+      <button onclick="addPack()">Add Pack</button>
+    </div>
+  </div>
+
+  <script nonce="${nonce}">
+    const vscode = acquireVsCodeApi();
+
+    // Initialize
+    vscode.postMessage({ command: 'init' });
+
+    // Listen for messages from extension
+    window.addEventListener('message', event => {
+      const message = event.data;
+      if (message.command === 'loadConfig') {
+        loadConfig(message.data);
+      }
+    });
+
+    function loadConfig(data) {
+      const config = data.config;
+      const structure = data.structure;
+
+      // Update project info
+      if (structure) {
+        document.getElementById('relayStatus').textContent = structure.exists ? '✓ Configured' : '⚠ Not configured';
+        document.getElementById('relayStatus').className = 'info-value ' + (structure.exists ? 'status-ok' : 'status-warning');
+        document.getElementById('expertsCount').textContent = structure.expertsCount || '0';
+        document.getElementById('teamsCount').textContent = structure.teamsCount || '0';
+        document.getElementById('relayRoot').textContent = structure.relayDir || '-';
+      }
+
+      // Update domain selection
+      if (config) {
+        document.querySelectorAll('.domain-option').forEach(el => {
+          el.classList.toggle('selected', el.dataset.domain === config.domain);
+        });
+
+        // Update project name
+        document.getElementById('projectName').value = config.project_name || '';
+
+        // Update packs
+        updatePacksList(config.active_packs || []);
+      }
+    }
+
+    function selectDomain(domain) {
+      document.querySelectorAll('.domain-option').forEach(el => {
+        el.classList.toggle('selected', el.dataset.domain === domain);
+      });
+      vscode.postMessage({ command: 'saveDomain', domain });
+    }
+
+    function saveProjectName() {
+      const name = document.getElementById('projectName').value;
+      vscode.postMessage({ command: 'saveProjectName', name });
+    }
+
+    function addPack() {
+      const input = document.getElementById('newPack');
+      const pack = input.value.trim();
+      if (pack) {
+        vscode.postMessage({ command: 'addPack', pack });
+        input.value = '';
+      }
+    }
+
+    function removePack(pack) {
+      vscode.postMessage({ command: 'removePack', pack });
+    }
+
+    function updatePacksList(packs) {
+      const container = document.getElementById('packsList');
+      if (packs.length === 0) {
+        container.innerHTML = '<span style="color: var(--fg-secondary);">No active packs</span>';
+        return;
+      }
+
+      container.innerHTML = packs.map(pack => \`
+        <span class="pack-tag">
+          \${pack}
+          <button onclick="removePack('\${pack}')" title="Remove">×</button>
+        </span>
+      \`).join('');
+    }
+  </script>
+</body>
+</html>`;
+}
+
+
+/***/ }),
+/* 90 */
+/***/ (function(__unused_webpack_module, exports, __webpack_require__) {
+
+
+/**
+ * ConfigService - Domain and API key configuration management
+ *
+ * Handles:
+ * - Domain configuration (active packs, project name)
+ * - API key status checking
+ * - Relay plugin settings
+ */
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.configService = exports.ConfigService = void 0;
+const vscode = __importStar(__webpack_require__(1));
+const fs = __importStar(__webpack_require__(5));
+const path = __importStar(__webpack_require__(4));
+const FileService_1 = __webpack_require__(3);
+const pathResolver_1 = __webpack_require__(91);
+class ConfigService {
+    CONFIG_FILE = 'domain-config.json';
+    CLAUDE_CONFIG = 'settings.json';
+    // ==========================================================================
+    // Domain Configuration
+    // ==========================================================================
+    async getDomainConfig() {
+        const result = await FileService_1.fileService.readDomainConfig();
+        if (!result.success || !result.data) {
+            // Return default config
+            return {
+                success: true,
+                data: this.getDefaultConfig()
+            };
+        }
+        return {
+            success: true,
+            data: {
+                domain: result.data.domain,
+                active_packs: result.data.active_packs || [],
+                project_name: result.data.project_name || '',
+                coordinator_model: 'claude-opus-4-6',
+                execution_mode: 'teammate'
+            }
+        };
+    }
+    async updateDomainConfig(updates) {
+        const current = await this.getDomainConfig();
+        if (!current.success || !current.data) {
+            return { success: false, error: 'Failed to read current config' };
+        }
+        const updated = {
+            ...current.data,
+            ...updates
+        };
+        const domainConfig = {
+            domain: updated.domain,
+            active_packs: updated.active_packs,
+            project_name: updated.project_name,
+            configured_at: new Date().toISOString()
+        };
+        const result = await FileService_1.fileService.writeDomainConfig(domainConfig);
+        if (!result.success) {
+            return { success: false, error: result.error };
+        }
+        return { success: true, data: updated };
+    }
+    async setDomain(domain) {
+        return this.updateDomainConfig({ domain }).then(() => ({ success: true }));
+    }
+    async setActivePacks(packs) {
+        return this.updateDomainConfig({ active_packs: packs }).then(() => ({ success: true }));
+    }
+    async addActivePack(pack) {
+        const current = await this.getDomainConfig();
+        if (!current.success || !current.data) {
+            return { success: false, error: 'Failed to read current config' };
+        }
+        const packs = current.data.active_packs;
+        if (!packs.includes(pack)) {
+            packs.push(pack);
+        }
+        return this.updateDomainConfig({ active_packs: packs }).then(() => ({ success: true }));
+    }
+    async removeActivePack(pack) {
+        const current = await this.getDomainConfig();
+        if (!current.success || !current.data) {
+            return { success: false, error: 'Failed to read current config' };
+        }
+        const packs = current.data.active_packs.filter(p => p !== pack);
+        const result = await this.updateDomainConfig({ active_packs: packs });
+        return result.success ? { success: true } : { success: false, error: result.error };
+    }
+    async setProjectName(name) {
+        return this.updateDomainConfig({ project_name: name }).then(() => ({ success: true }));
+    }
+    // ==========================================================================
+    // API Key Status
+    // ==========================================================================
+    async getApiKeyStatus() {
+        const statuses = [];
+        // Check Claude API key
+        statuses.push(await this.checkClaudeApiKey());
+        // Check Codex API key
+        statuses.push(await this.checkCodexApiKey());
+        // Check Gemini API key
+        statuses.push(await this.checkGeminiApiKey());
+        // Check Zai MCP server
+        statuses.push(await this.checkZaiMcp());
+        return { success: true, data: statuses };
+    }
+    async checkClaudeApiKey() {
+        // Check environment variable
+        const envKey = process.env.ANTHROPIC_API_KEY;
+        if (envKey && envKey.startsWith('sk-ant-')) {
+            return {
+                provider: 'Claude (Anthropic)',
+                configured: true,
+                source: 'Environment variable (ANTHROPIC_API_KEY)'
+            };
+        }
+        // Check Claude Code settings
+        const claudeConfig = await this.getClaudeSettings();
+        if (claudeConfig?.apiKey) {
+            return {
+                provider: 'Claude (Anthropic)',
+                configured: true,
+                source: 'Claude Code settings'
+            };
+        }
+        return {
+            provider: 'Claude (Anthropic)',
+            configured: false,
+            error: 'No API key found. Set ANTHROPIC_API_KEY environment variable or configure in Claude Code settings.'
+        };
+    }
+    async checkCodexApiKey() {
+        // Check environment variable
+        const envKey = process.env.OPENAI_API_KEY;
+        if (envKey && envKey.startsWith('sk-')) {
+            return {
+                provider: 'Codex (OpenAI)',
+                configured: true,
+                source: 'Environment variable (OPENAI_API_KEY)'
+            };
+        }
+        return {
+            provider: 'Codex (OpenAI)',
+            configured: false,
+            error: 'No API key found. Set OPENAI_API_KEY environment variable.'
+        };
+    }
+    async checkGeminiApiKey() {
+        // Check environment variable
+        const envKey = process.env.GEMINI_API_KEY;
+        if (envKey && envKey.length > 0) {
+            return {
+                provider: 'Gemini (Google)',
+                configured: true,
+                source: 'Environment variable (GEMINI_API_KEY)'
+            };
+        }
+        return {
+            provider: 'Gemini (Google)',
+            configured: false,
+            error: 'No API key found. Set GEMINI_API_KEY environment variable.'
+        };
+    }
+    async checkZaiMcp() {
+        // Check if MCP server is configured
+        // This would check the MCP server configuration
+        const mcpConfigured = await this.isMcpServerConfigured('zai-mcp-server');
+        return {
+            provider: 'Zai MCP',
+            configured: mcpConfigured,
+            source: mcpConfigured ? 'MCP server configuration' : undefined,
+            error: mcpConfigured ? undefined : 'Zai MCP server not configured. Check Claude Code MCP settings.'
+        };
+    }
+    // ==========================================================================
+    // Relay Structure
+    // ==========================================================================
+    async checkRelayStructure() {
+        const relayRoot = (0, pathResolver_1.getRelayRoot)();
+        const exists = fs.existsSync(relayRoot);
+        const expertsDir = path.join(relayRoot, 'experts');
+        const teamsDir = path.join(relayRoot, 'teams');
+        const agentLibraryDir = path.join(relayRoot, 'agent-library', 'definitions');
+        const configFile = path.join(relayRoot, this.CONFIG_FILE);
+        let expertsCount = 0;
+        let teamsCount = 0;
+        if (exists) {
+            if (fs.existsSync(expertsDir)) {
+                const files = fs.readdirSync(expertsDir).filter(f => f.endsWith('.md'));
+                expertsCount = files.length;
+            }
+            if (fs.existsSync(teamsDir)) {
+                const files = fs.readdirSync(teamsDir).filter(f => f.endsWith('.json'));
+                teamsCount = files.length;
+            }
+        }
+        return {
+            success: true,
+            data: {
+                exists,
+                relayDir: relayRoot,
+                expertsDir,
+                teamsDir,
+                agentLibraryDir,
+                configFile,
+                expertsCount,
+                teamsCount
+            }
+        };
+    }
+    async initializeRelayStructure() {
+        const relayRoot = (0, pathResolver_1.getRelayRoot)();
+        try {
+            // Create relay directory
+            if (!fs.existsSync(relayRoot)) {
+                fs.mkdirSync(relayRoot, { recursive: true });
+            }
+            // Create subdirectories
+            const dirs = [
+                path.join(relayRoot, 'experts'),
+                path.join(relayRoot, 'teams'),
+                path.join(relayRoot, 'agent-library', 'definitions')
+            ];
+            for (const dir of dirs) {
+                if (!fs.existsSync(dir)) {
+                    fs.mkdirSync(dir, { recursive: true });
+                }
+            }
+            // Create default domain config if it doesn't exist
+            const configPath = path.join(relayRoot, this.CONFIG_FILE);
+            if (!fs.existsSync(configPath)) {
+                const defaultConfig = this.getDefaultConfig();
+                const domainConfig = {
+                    domain: defaultConfig.domain,
+                    active_packs: defaultConfig.active_packs,
+                    project_name: defaultConfig.project_name,
+                    configured_at: new Date().toISOString()
+                };
+                fs.writeFileSync(configPath, JSON.stringify(domainConfig, null, 2), 'utf-8');
+            }
+            return { success: true, data: relayRoot };
+        }
+        catch (error) {
+            return { success: false, error: String(error) };
+        }
+    }
+    // ==========================================================================
+    // Helpers
+    // ==========================================================================
+    getDefaultConfig() {
+        const workspaceName = path.basename(vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || 'project');
+        return {
+            domain: 'general',
+            active_packs: [],
+            project_name: workspaceName,
+            coordinator_model: 'claude-opus-4-6',
+            execution_mode: 'teammate'
+        };
+    }
+    async getClaudeSettings() {
+        try {
+            const claudeConfigPath = path.join((0, pathResolver_1.getClaudeRoot)(), this.CLAUDE_CONFIG);
+            if (!fs.existsSync(claudeConfigPath)) {
+                return null;
+            }
+            const content = fs.readFileSync(claudeConfigPath, 'utf-8');
+            return JSON.parse(content);
+        }
+        catch {
+            return null;
+        }
+    }
+    async isMcpServerConfigured(serverName) {
+        // Check if MCP server is configured in Claude settings
+        // This is a simplified check - in practice, you'd read the MCP config
+        try {
+            const claudeConfigPath = path.join((0, pathResolver_1.getClaudeRoot)(), this.CLAUDE_CONFIG);
+            if (!fs.existsSync(claudeConfigPath)) {
+                return false;
+            }
+            const content = fs.readFileSync(claudeConfigPath, 'utf-8');
+            const config = JSON.parse(content);
+            // Check if MCP servers are configured
+            if (config.mcpServers && config.mcpServers[serverName]) {
+                return true;
+            }
+            return false;
+        }
+        catch {
+            return false;
+        }
+    }
+    // ==========================================================================
+    // Project Info
+    // ==========================================================================
+    async getProjectInfo() {
+        const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+        if (!workspaceFolder) {
+            return { success: false, error: 'No workspace folder open' };
+        }
+        const relayCheck = await this.checkRelayStructure();
+        const relayInfo = relayCheck.success && relayCheck.data
+            ? relayCheck.data
+            : { exists: false, expertsCount: 0, teamsCount: 0 };
+        const domainConfig = await this.getDomainConfig();
+        const projectName = domainConfig.success && domainConfig.data
+            ? domainConfig.data.project_name
+            : path.basename(workspaceFolder.uri.fsPath);
+        return {
+            success: true,
+            data: {
+                name: projectName,
+                path: workspaceFolder.uri.fsPath,
+                relayConfigured: relayInfo.exists,
+                expertCount: relayInfo.expertsCount,
+                teamCount: relayInfo.teamsCount
+            }
+        };
+    }
+    async openRelayFolder() {
+        const relayRoot = (0, pathResolver_1.getRelayRoot)();
+        const uri = vscode.Uri.file(relayRoot);
+        // Check if directory exists
+        if (!fs.existsSync(relayRoot)) {
+            const init = await this.initializeRelayStructure();
+            if (!init.success) {
+                vscode.window.showErrorMessage(`Failed to initialize relay structure: ${init.error}`);
+                return;
+            }
+        }
+        // Open in VS Code
+        await vscode.commands.executeCommand('vscode.openFolder', uri, { forceNewWindow: false });
+    }
+    async openDomainConfig() {
+        const configPath = path.join((0, pathResolver_1.getRelayRoot)(), this.CONFIG_FILE);
+        // Ensure config exists
+        await this.initializeRelayStructure();
+        const uri = vscode.Uri.file(configPath);
+        await vscode.commands.executeCommand('vscode.open', uri);
+    }
+}
+exports.ConfigService = ConfigService;
+// Singleton export
+exports.configService = new ConfigService();
+
+
+/***/ }),
+/* 91 */
+/***/ (function(__unused_webpack_module, exports, __webpack_require__) {
+
+
+/**
+ * pathResolver - Resolve .claude/relay directory paths
+ *
+ * Provides centralized path resolution for all relay-plugin data locations.
+ */
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.getWorkspaceRoot = getWorkspaceRoot;
+exports.getClaudeRoot = getClaudeRoot;
+exports.getRelayRoot = getRelayRoot;
+exports.getExpertsDir = getExpertsDir;
+exports.getTeamsDir = getTeamsDir;
+exports.getAgentDefinitionsDir = getAgentDefinitionsDir;
+exports.getDomainConfigPath = getDomainConfigPath;
+exports.getExpertPath = getExpertPath;
+exports.getTeamPath = getTeamPath;
+exports.getAgentDefinitionPath = getAgentDefinitionPath;
+exports.checkRelayStructure = checkRelayStructure;
+exports.ensureRelayStructure = ensureRelayStructure;
+const vscode = __importStar(__webpack_require__(1));
+const path = __importStar(__webpack_require__(4));
+const fs = __importStar(__webpack_require__(5));
+/**
+ * Get the workspace root folder
+ *
+ * @returns Workspace root path or empty string if no workspace open
+ */
+function getWorkspaceRoot() {
+    return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+}
+/**
+ * Get the .claude directory root
+ *
+ * @returns Path to .claude directory
+ */
+function getClaudeRoot() {
+    return path.join(getWorkspaceRoot(), '.claude');
+}
+/**
+ * Get the relay plugin root directory
+ *
+ * @returns Path to .claude/relay directory
+ */
+function getRelayRoot() {
+    return path.join(getClaudeRoot(), 'relay');
+}
+/**
+ * Get the experts directory
+ *
+ * @returns Path to .claude/relay/experts directory
+ */
+function getExpertsDir() {
+    return path.join(getRelayRoot(), 'experts');
+}
+/**
+ * Get the teams directory
+ *
+ * @returns Path to .claude/relay/teams directory
+ */
+function getTeamsDir() {
+    return path.join(getRelayRoot(), 'teams');
+}
+/**
+ * Get the agent library definitions directory
+ *
+ * @returns Path to .claude/relay/agent-library/definitions directory
+ */
+function getAgentDefinitionsDir() {
+    return path.join(getRelayRoot(), 'agent-library', 'definitions');
+}
+/**
+ * Get the domain config file path
+ *
+ * @returns Path to .claude/relay/domain-config.json
+ */
+function getDomainConfigPath() {
+    return path.join(getRelayRoot(), 'domain-config.json');
+}
+/**
+ * Get expert file path by slug
+ *
+ * @param slug - Expert slug
+ * @returns Path to expert markdown file
+ */
+function getExpertPath(slug) {
+    return path.join(getExpertsDir(), `${slug}.md`);
+}
+/**
+ * Get team file path by slug
+ *
+ * @param slug - Team slug
+ * @returns Path to team JSON file
+ */
+function getTeamPath(slug) {
+    return path.join(getTeamsDir(), `${slug}.json`);
+}
+/**
+ * Get agent definition file path by ID
+ *
+ * @param id - Agent definition ID
+ * @returns Path to agent definition JSON file
+ */
+function getAgentDefinitionPath(id) {
+    return path.join(getAgentDefinitionsDir(), `${id}.json`);
+}
+/**
+ * Check if relay directory structure exists
+ *
+ * @returns Object indicating which directories exist
+ */
+function checkRelayStructure() {
+    const root = getRelayRoot();
+    return {
+        relayExists: fs.existsSync(root),
+        expertsExists: fs.existsSync(getExpertsDir()),
+        teamsExists: fs.existsSync(getTeamsDir()),
+        agentLibraryExists: fs.existsSync(getAgentDefinitionsDir())
+    };
+}
+/**
+ * Ensure all relay directories exist
+ *
+ * @returns Path to relay root
+ * @throws Error if workspace is not open
+ */
+function ensureRelayStructure() {
+    const root = getRelayRoot();
+    if (!getWorkspaceRoot()) {
+        throw new Error('No workspace folder is open');
+    }
+    // Create relay directory
+    if (!fs.existsSync(root)) {
+        fs.mkdirSync(root, { recursive: true });
+    }
+    // Create subdirectories
+    const dirs = [
+        getExpertsDir(),
+        getTeamsDir(),
+        getAgentDefinitionsDir()
+    ];
+    dirs.forEach(dir => {
+        if (!fs.existsSync(dir)) {
+            fs.mkdirSync(dir, { recursive: true });
+        }
+    });
+    return root;
+}
 
 
 /***/ })

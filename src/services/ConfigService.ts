@@ -115,7 +115,8 @@ export class ConfigService {
     }
 
     const packs = current.data.active_packs.filter(p => p !== pack);
-    return this.updateDomainConfig({ active_packs: packs }).then(() => ({ success: true }));
+    const result = await this.updateDomainConfig({ active_packs: packs });
+    return result.success ? { success: true } : { success: false, error: result.error };
   }
 
   async setProjectName(name: string): Promise<ServiceResult<void>> {

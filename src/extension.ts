@@ -10,6 +10,7 @@ import { FileService, fileService } from './services/FileService';
 import { visualizationService } from './services/VisualizationService';
 import { TeamBuilderPanel } from './webviews/TeamBuilderPanel';
 import { openExpertManager } from './webviews/ExpertManager';
+import { openDomainSettings as openDomainSettingsPanel } from './webviews/DomainSettings';
 import { getNonce } from './utils/webview';
 
 let treeProvider: AgentTreeProvider;
@@ -34,7 +35,12 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.commands.registerCommand('agentManager.createExpert', () => createExpert(fileServiceInstance)),
     vscode.commands.registerCommand('agentManager.buildTeam', () => buildTeam(fileServiceInstance)),
     vscode.commands.registerCommand('agentManager.editAgent', () => editAgent(fileServiceInstance)),
-    vscode.commands.registerCommand('agentManager.openSettings', () => openSettings(fileServiceInstance)),
+    vscode.commands.registerCommand('agentManager.openSettings', () => {
+      const workspaceFolders = vscode.workspace.workspaceFolders;
+      if (workspaceFolders && workspaceFolders.length > 0) {
+        openDomainSettings(workspaceFolders[0].uri);
+      }
+    }),
     vscode.commands.registerCommand('agentManager.refreshTree', () => treeProvider.refresh()),
     vscode.commands.registerCommand('agentManager.viewTeamDiagram', (teamSlug: string) => viewTeamDiagram(fileServiceInstance, teamSlug)),
     vscode.commands.registerCommand('agentManager.viewExpertDiagram', (expertSlug: string) => viewExpertDiagram(fileServiceInstance, expertSlug)),
@@ -219,21 +225,16 @@ async function editAgent(fileService: FileService, expertSlug?: string) {
 }
 
 async function openSettings(fileService: FileService) {
-  const config = await fileService.readDomainConfig();
-  if (config.success && config.data) {
-    vscode.window.showInformationMessage(
-      `Domain: ${config.data.domain}, Project: ${config.data.project_name}`
-    );
+  const workspaceFolders = vscode.workspace.workspaceFolders;
+  if (workspaceFolders && workspaceFolders.length > 0) {
+    openDomainSettings(workspaceFolders[0].uri);
   } else {
-    const action = await vscode.window.showWarningMessage(
-      'Relay plugin not configured. Would you like to set it up?',
-      'Setup Now',
-      'Cancel'
-    );
-    if (action === 'Setup Now') {
-      vscode.window.showInformationMessage('Please run /relay:setup in the chat to configure relay plugin.');
-    }
+    vscode.window.showWarningMessage('Please open a workspace first.');
   }
+}
+
+function openDomainSettings(extensionUri: vscode.Uri) {
+  openDomainSettingsPanel(extensionUri);
 }
 
 async function viewTeamDiagram(fileService: FileService, teamSlug: string) {
