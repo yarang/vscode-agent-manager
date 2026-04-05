@@ -7,6 +7,7 @@
 import * as vscode from 'vscode';
 import { Expert } from '../types';
 import { expertManagerService } from '../services/ExpertManagerService';
+import { getNonce } from '../utils/webview';
 
 let currentPanel: vscode.WebviewPanel | undefined;
 
@@ -40,7 +41,7 @@ export function openExpertManager(
   currentPanel.webview.onDidReceiveMessage(
     async (message) => {
       const panel = currentPanel;
-      if (!panel) return;
+      if (!panel) {return;}
 
       switch (message.command) {
         case 'init':
@@ -190,7 +191,7 @@ async function handleDuplicate(panel: vscode.WebviewPanel, slug: string) {
     }
   });
 
-  if (!newSlug) return;
+  if (!newSlug) {return;}
 
   const result = await expertManagerService.duplicateExpert(slug, newSlug);
 
@@ -262,8 +263,7 @@ async function handleValidateSlug(
 // HTML Generation
 // ==========================================================================
 
-function getHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
-  const { getNonce } = require('../utils/webview');
+function getHtml(_webview: vscode.Webview, _extensionUri: vscode.Uri): string {
   const nonce = getNonce();
 
   return `<!DOCTYPE html>

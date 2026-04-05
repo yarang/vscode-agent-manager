@@ -573,7 +573,7 @@ export function registerTreeCommands(context: vscode.ExtensionContext, fileServi
         value: `${slug}-copy`
       });
 
-      if (!newSlug) return;
+      if (!newSlug) {return;}
 
       const newExpert = { ...result.data, slug: newSlug, role: `${result.data.role} (Copy)` };
       const createResult = await fileService.createExpert(newExpert);

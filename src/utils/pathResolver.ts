@@ -6,6 +6,7 @@
 
 import * as vscode from 'vscode';
 import * as path from 'path';
+import * as fs from 'fs';
 
 /**
  * Get the workspace root folder
@@ -112,7 +113,6 @@ export function checkRelayStructure(): {
   agentLibraryExists: boolean;
 } {
   const root = getRelayRoot();
-  const fs = require('fs');
 
   return {
     relayExists: fs.existsSync(root),
@@ -130,7 +130,6 @@ export function checkRelayStructure(): {
  */
 export function ensureRelayStructure(): string {
   const root = getRelayRoot();
-  const fs = require('fs');
 
   if (!getWorkspaceRoot()) {
     throw new Error('No workspace folder is open');
