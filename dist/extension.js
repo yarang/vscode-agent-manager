@@ -48,43 +48,87 @@ exports.activate = activate;
 exports.deactivate = deactivate;
 const vscode = __importStar(__webpack_require__(1));
 const AgentTreeProvider_1 = __webpack_require__(2);
-const FileService_1 = __webpack_require__(3);
-const VisualizationService_1 = __webpack_require__(80);
-const TeamBuilderPanel_1 = __webpack_require__(81);
-const ExpertManager_1 = __webpack_require__(87);
-const DomainSettings_1 = __webpack_require__(89);
-const webview_1 = __webpack_require__(86);
+const FileService_1 = __webpack_require__(5);
+const TemplateService_1 = __webpack_require__(81);
+const RelayEventWatcher_1 = __webpack_require__(82);
+const VisualizationService_1 = __webpack_require__(83);
+const TeamBuilderPanel_1 = __webpack_require__(84);
+const ExpertManager_1 = __webpack_require__(89);
+const DomainSettings_1 = __webpack_require__(91);
+const SpecBrowserPanel_1 = __webpack_require__(94);
+const ExportImportPanel_1 = __webpack_require__(95);
+const webview_1 = __webpack_require__(88);
 let treeProvider;
 let currentDashboardPanel;
+let relayEventWatcher;
 function activate(context) {
     console.log('Agent Manager extension is activating...');
     // Initialize services
     const fileServiceInstance = new FileService_1.FileService();
+    const templateServiceInstance = new TemplateService_1.TemplateService(fileServiceInstance);
+    // Initialize file system watcher
+    relayEventWatcher = new RelayEventWatcher_1.RelayEventWatcher();
+    relayEventWatcher.start(fileServiceInstance.getRelayRoot(), {
+        onRefreshTree: () => treeProvider?.refresh(),
+        onRefreshTemplates: () => treeProvider?.refresh()
+    });
+    context.subscriptions.push(relayEventWatcher);
+    // Re-detect plugin root when settings change
+    context.subscriptions.push(vscode.workspace.onDidChangeConfiguration(e => {
+        if (e.affectsConfiguration('agentManager.relayPluginPath')) {
+            templateServiceInstance.refresh();
+            treeProvider?.refresh();
+        }
+    }));
     // Register tree data provider
-    treeProvider = new AgentTreeProvider_1.AgentTreeProvider(fileServiceInstance, context);
+    treeProvider = new AgentTreeProvider_1.AgentTreeProvider(fileServiceInstance, templateServiceInstance, context);
     vscode.window.registerTreeDataProvider('agentManager.treeView', treeProvider);
     // Register tree view commands
-    (0, AgentTreeProvider_1.registerTreeCommands)(context, fileServiceInstance);
+    (0, AgentTreeProvider_1.registerTreeCommands)(context, fileServiceInstance, templateServiceInstance);
     // Register commands
     const commands = [
         vscode.commands.registerCommand('agentManager.openDashboard', () => openDashboard(fileServiceInstance)),
-        vscode.commands.registerCommand('agentManager.createExpert', () => createExpert(fileServiceInstance)),
+        vscode.commands.registerCommand('agentManager.createExpert', () => createExpert(fileServiceInstance, templateServiceInstance)),
         vscode.commands.registerCommand('agentManager.buildTeam', () => buildTeam(fileServiceInstance)),
-        vscode.commands.registerCommand('agentManager.editAgent', () => editAgent(fileServiceInstance)),
+        vscode.commands.registerCommand('agentManager.editAgent', (expertSlug) => editAgent(fileServiceInstance, expertSlug, templateServiceInstance)),
         vscode.commands.registerCommand('agentManager.openSettings', () => {
-            const workspaceFolders = vscode.workspace.workspaceFolders;
-            if (workspaceFolders && workspaceFolders.length > 0) {
-                openDomainSettings(workspaceFolders[0].uri);
+            const ws = vscode.workspace.workspaceFolders;
+            if (ws && ws.length > 0) {
+                openDomainSettings(ws[0].uri);
             }
         }),
         vscode.commands.registerCommand('agentManager.refreshTree', () => treeProvider.refresh()),
         vscode.commands.registerCommand('agentManager.viewTeamDiagram', (teamSlug) => viewTeamDiagram(fileServiceInstance, teamSlug)),
         vscode.commands.registerCommand('agentManager.viewExpertDiagram', (expertSlug) => viewExpertDiagram(fileServiceInstance, expertSlug)),
         vscode.commands.registerCommand('agentManager.openExpertManager', (expertSlug) => {
-            const workspaceFolders = vscode.workspace.workspaceFolders;
-            if (workspaceFolders && workspaceFolders.length > 0) {
-                (0, ExpertManager_1.openExpertManager)(workspaceFolders[0].uri, expertSlug);
+            const ws = vscode.workspace.workspaceFolders;
+            if (ws && ws.length > 0) {
+                (0, ExpertManager_1.openExpertManager)(ws[0].uri, expertSlug, templateServiceInstance);
             }
+        }),
+        // Spec Browser
+        vscode.commands.registerCommand('agentManager.openSpecBrowser', () => {
+            const ws = vscode.workspace.workspaceFolders;
+            if (ws && ws.length > 0) {
+                (0, SpecBrowserPanel_1.openSpecBrowser)(ws[0].uri, templateServiceInstance, fileServiceInstance);
+            }
+        }),
+        // Export / Import
+        vscode.commands.registerCommand('agentManager.exportTemplates', () => {
+            const ws = vscode.workspace.workspaceFolders;
+            if (ws && ws.length > 0) {
+                (0, ExportImportPanel_1.openExportImportPanel)(ws[0].uri, fileServiceInstance, templateServiceInstance, 'export');
+            }
+        }),
+        vscode.commands.registerCommand('agentManager.importTemplates', () => {
+            const ws = vscode.workspace.workspaceFolders;
+            if (ws && ws.length > 0) {
+                (0, ExportImportPanel_1.openExportImportPanel)(ws[0].uri, fileServiceInstance, templateServiceInstance, 'import');
+            }
+        }),
+        // Agent Activity output panel
+        vscode.commands.registerCommand('agentManager.showAgentActivity', () => {
+            relayEventWatcher.showOutputChannel();
         }),
     ];
     commands.forEach(cmd => context.subscriptions.push(cmd));
@@ -111,10 +155,7 @@ async function openDashboard(fileService) {
             vscode.Uri.joinPath(vscode.Uri.file(fileService.getRelayRoot()), 'teams')
         ]
     });
-    currentDashboardPanel.onDidDispose(() => {
-        currentDashboardPanel = undefined;
-    });
-    // Handle messages from webview
+    currentDashboardPanel.onDidDispose(() => { currentDashboardPanel = undefined; });
     currentDashboardPanel.webview.onDidReceiveMessage(async (message) => {
         switch (message.command) {
             case 'requestData':
@@ -135,8 +176,11 @@ async function openDashboard(fileService) {
             case 'openTeam':
                 await openTeamInEditor(fileService, message.slug);
                 break;
+            case 'openSpecBrowser':
+                vscode.commands.executeCommand('agentManager.openSpecBrowser');
+                break;
         }
-    }, undefined);
+    });
     currentDashboardPanel.webview.html = getDashboardHtml(currentDashboardPanel.webview);
 }
 async function handleDataRequest(panel, fileService) {
@@ -154,89 +198,58 @@ async function handleDataRequest(panel, fileService) {
     const teamDiagram = VisualizationService_1.visualizationService.generateTeamDiagram(teams);
     panel.webview.postMessage({
         command: 'data',
-        data: {
-            experts,
-            teams,
-            config,
-            stats: {
-                experts: expertStats,
-                teams: teamStats
-            },
-            diagrams: {
-                overview: overviewDiagram,
-                teams: teamDiagram
-            }
+        data: { experts, teams, config,
+            stats: { experts: expertStats, teams: teamStats },
+            diagrams: { overview: overviewDiagram, teams: teamDiagram }
         }
     });
 }
 async function openExpertInEditor(fileService, slug) {
-    const filePath = fileService.getExpertsDir() + `/${slug}.md`;
-    const uri = vscode.Uri.file(filePath);
-    await vscode.commands.executeCommand('vscode.openWith', uri, 'default');
+    const filePath = `${fileService.getExpertsDir()}/${slug}.md`;
+    await vscode.commands.executeCommand('vscode.openWith', vscode.Uri.file(filePath), 'default');
 }
 async function openTeamInEditor(fileService, slug) {
-    const filePath = fileService.getTeamsDir() + `/${slug}.json`;
-    const uri = vscode.Uri.file(filePath);
-    await vscode.commands.executeCommand('vscode.openWith', uri, 'default');
+    const filePath = `${fileService.getTeamsDir()}/${slug}.json`;
+    await vscode.commands.executeCommand('vscode.openWith', vscode.Uri.file(filePath), 'default');
 }
-async function createExpert(fileService) {
-    // Open Expert Manager webview
-    const workspaceFolders = vscode.workspace.workspaceFolders;
-    if (workspaceFolders && workspaceFolders.length > 0) {
-        (0, ExpertManager_1.openExpertManager)(workspaceFolders[0].uri);
+async function createExpert(fileService, templateService) {
+    const ws = vscode.workspace.workspaceFolders;
+    if (ws && ws.length > 0) {
+        (0, ExpertManager_1.openExpertManager)(ws[0].uri, undefined, templateService);
     }
     else {
         vscode.window.showErrorMessage('Please open a workspace folder first');
     }
 }
-async function buildTeam(fileService, editingSlug) {
-    const extensionUri = vscode.Uri.file(fileService.getRelayRoot()).with({ scheme: 'file' });
-    // Navigate to extension root
-    const workspaceFolders = vscode.workspace.workspaceFolders;
-    if (workspaceFolders && workspaceFolders.length > 0) {
-        await TeamBuilderPanel_1.TeamBuilderPanel.createOrShow(workspaceFolders[0].uri, editingSlug);
+async function buildTeam(fileService) {
+    const ws = vscode.workspace.workspaceFolders;
+    if (ws && ws.length > 0) {
+        await TeamBuilderPanel_1.TeamBuilderPanel.createOrShow(ws[0].uri);
     }
     else {
         vscode.window.showErrorMessage('Please open a workspace folder first');
     }
 }
-async function editAgent(fileService, expertSlug) {
+async function editAgent(fileService, expertSlug, templateService) {
     if (expertSlug) {
-        // Direct edit from tree view
-        const workspaceFolders = vscode.workspace.workspaceFolders;
-        if (workspaceFolders && workspaceFolders.length > 0) {
-            (0, ExpertManager_1.openExpertManager)(workspaceFolders[0].uri, expertSlug);
+        const ws = vscode.workspace.workspaceFolders;
+        if (ws && ws.length > 0) {
+            (0, ExpertManager_1.openExpertManager)(ws[0].uri, expertSlug, templateService);
         }
         return;
     }
-    // Show picker to select expert
     const agents = await fileService.listExperts();
     if (!agents.success || !agents.data || agents.data.length === 0) {
         vscode.window.showInformationMessage('No experts found. Create one first!');
         return;
     }
-    const items = agents.data.map(e => ({
-        label: e.role,
-        description: e.slug,
-        slug: e.slug
-    }));
-    const selected = await vscode.window.showQuickPick(items, {
-        placeHolder: 'Select expert to edit'
-    });
+    const items = agents.data.map(e => ({ label: e.role, description: e.slug, slug: e.slug }));
+    const selected = await vscode.window.showQuickPick(items, { placeHolder: 'Select expert to edit' });
     if (selected) {
-        const workspaceFolders = vscode.workspace.workspaceFolders;
-        if (workspaceFolders && workspaceFolders.length > 0) {
-            (0, ExpertManager_1.openExpertManager)(workspaceFolders[0].uri, selected.slug);
+        const ws = vscode.workspace.workspaceFolders;
+        if (ws && ws.length > 0) {
+            (0, ExpertManager_1.openExpertManager)(ws[0].uri, selected.slug, templateService);
         }
-    }
-}
-async function openSettings(fileService) {
-    const workspaceFolders = vscode.workspace.workspaceFolders;
-    if (workspaceFolders && workspaceFolders.length > 0) {
-        openDomainSettings(workspaceFolders[0].uri);
-    }
-    else {
-        vscode.window.showWarningMessage('Please open a workspace first.');
     }
 }
 function openDomainSettings(extensionUri) {
@@ -293,312 +306,78 @@ function getDashboardHtml(webview) {
       --accent-color: var(--vscode-textLink-foreground);
       --accent-hover: var(--vscode-textLink-activeForeground);
       --success-color: var(--vscode-testing-iconPassed);
-      --warning-color: var(--vscode-testing-iconSkipped);
-      --error-color: var(--vscode-errorForeground);
       --card-radius: 8px;
       --spacing-sm: 8px;
       --spacing-md: 16px;
       --spacing-lg: 24px;
     }
-
-    * {
-      box-sizing: border-box;
-      margin: 0;
-      padding: 0;
-    }
-
-    body {
-      font-family: var(--vscode-font-family);
-      background: var(--bg-primary);
-      color: var(--text-primary);
-      padding: var(--spacing-lg);
-      line-height: 1.5;
-    }
-
-    .header {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      margin-bottom: var(--spacing-lg);
-      padding-bottom: var(--spacing-md);
-      border-bottom: 1px solid var(--border-color);
-    }
-
-    .header h1 {
-      font-size: 24px;
-      font-weight: 600;
-    }
-
-    .refresh-btn {
-      background: var(--accent-color);
-      color: var(--bg-primary);
-      border: none;
-      padding: 8px 16px;
-      border-radius: 4px;
-      cursor: pointer;
-      font-size: 13px;
-      transition: background 0.2s;
-    }
-
-    .refresh-btn:hover {
-      background: var(--accent-hover);
-    }
-
-    .stats-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-      gap: var(--spacing-md);
-      margin-bottom: var(--spacing-lg);
-    }
-
-    .stat-card {
-      background: var(--bg-secondary);
-      border: 1px solid var(--border-color);
-      border-radius: var(--card-radius);
-      padding: var(--spacing-md);
-      text-align: center;
-    }
-
-    .stat-value {
-      font-size: 36px;
-      font-weight: 700;
-      color: var(--accent-color);
-    }
-
-    .stat-label {
-      color: var(--text-secondary);
-      font-size: 13px;
-      text-transform: uppercase;
-      letter-spacing: 0.5px;
-      margin-top: var(--spacing-sm);
-    }
-
-    .stat-breakdown {
-      display: flex;
-      justify-content: center;
-      gap: var(--spacing-md);
-      margin-top: var(--spacing-sm);
-      font-size: 12px;
-      color: var(--text-secondary);
-    }
-
-    .section {
-      margin-bottom: var(--spacing-lg);
-    }
-
-    .section-title {
-      font-size: 18px;
-      font-weight: 600;
-      margin-bottom: var(--spacing-md);
-      display: flex;
-      align-items: center;
-      gap: var(--spacing-sm);
-    }
-
-    .section-title::before {
-      content: '';
-      width: 4px;
-      height: 18px;
-      background: var(--accent-color);
-      border-radius: 2px;
-    }
-
-    .card {
-      background: var(--bg-secondary);
-      border: 1px solid var(--border-color);
-      border-radius: var(--card-radius);
-      overflow: hidden;
-    }
-
-    .card-header {
-      padding: var(--spacing-md);
-      border-bottom: 1px solid var(--border-color);
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-    }
-
-    .card-title {
-      font-weight: 600;
-    }
-
-    .card-body {
-      padding: var(--spacing-md);
-    }
-
-    .actions {
-      display: flex;
-      gap: var(--spacing-sm);
-      flex-wrap: wrap;
-    }
-
-    .btn {
-      background: var(--bg-secondary);
-      border: 1px solid var(--border-color);
-      color: var(--text-primary);
-      padding: 10px 20px;
-      border-radius: 6px;
-      cursor: pointer;
-      font-size: 14px;
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      transition: all 0.2s;
-    }
-
-    .btn:hover {
-      background: var(--accent-color);
-      color: var(--bg-primary);
-      border-color: var(--accent-color);
-    }
-
-    .btn-primary {
-      background: var(--accent-color);
-      color: var(--bg-primary);
-      border-color: var(--accent-color);
-    }
-
-    .btn-primary:hover {
-      background: var(--accent-hover);
-      border-color: var(--accent-hover);
-    }
-
-    .list-item {
-      padding: var(--spacing-sm) 0;
-      border-bottom: 1px solid var(--border-color);
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      cursor: pointer;
-    }
-
-    .list-item:last-child {
-      border-bottom: none;
-    }
-
-    .list-item:hover {
-      background: var(--vscode-list-hoverBackground);
-    }
-
-    .list-item-info {
-      flex: 1;
-    }
-
-    .list-item-title {
-      font-weight: 500;
-    }
-
-    .list-item-desc {
-      font-size: 12px;
-      color: var(--text-secondary);
-    }
-
-    .list-item-badge {
-      padding: 2px 8px;
-      border-radius: 4px;
-      font-size: 11px;
-      background: var(--vscode-badge-background);
-      color: var(--vscode-badge-foreground);
-    }
-
-    .diagram-container {
-      background: var(--bg-primary);
-      border-radius: var(--card-radius);
-      padding: var(--spacing-md);
-      display: flex;
-      justify-content: center;
-      align-items: center;
-      min-height: 300px;
-    }
-
-    .diagram-tabs {
-      display: flex;
-      gap: var(--spacing-sm);
-      margin-bottom: var(--spacing-md);
-      border-bottom: 1px solid var(--border-color);
-      padding-bottom: var(--spacing-sm);
-    }
-
-    .tab {
-      padding: 8px 16px;
-      border: none;
-      background: none;
-      color: var(--text-secondary);
-      cursor: pointer;
-      border-radius: 4px 4px 0 0;
-      font-size: 14px;
-    }
-
-    .tab.active {
-      color: var(--accent-color);
-      background: var(--bg-secondary);
-    }
-
-    .loading {
-      text-align: center;
-      padding: var(--spacing-lg);
-      color: var(--text-secondary);
-    }
-
-    .spinner {
-      border: 3px solid var(--border-color);
-      border-top-color: var(--accent-color);
-      border-radius: 50%;
-      width: 40px;
-      height: 40px;
-      animation: spin 1s linear infinite;
-      margin: 0 auto var(--spacing-md);
-    }
-
-    @keyframes spin {
-      to { transform: rotate(360deg); }
-    }
-
-    .empty-state {
-      text-align: center;
-      padding: var(--spacing-lg);
-      color: var(--text-secondary);
-    }
-
-    .domain-tag {
-      display: inline-block;
-      padding: 2px 8px;
-      border-radius: 4px;
-      font-size: 11px;
-      margin-right: 4px;
-    }
-
-    .domain-general { background: #1f77b4; color: white; }
-    .domain-development { background: #2ca02c; color: white; }
-
-    .tier-tag {
-      display: inline-block;
-      padding: 2px 8px;
-      border-radius: 4px;
-      font-size: 11px;
-    }
-
-    .tier-trivial { background: #95a5a6; color: white; }
-    .tier-standard { background: #3498db; color: white; }
-    .tier-premium { background: #f39c12; color: white; }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: var(--vscode-font-family); background: var(--bg-primary);
+           color: var(--text-primary); padding: var(--spacing-lg); line-height: 1.5; }
+    .header { display: flex; justify-content: space-between; align-items: center;
+              margin-bottom: var(--spacing-lg); padding-bottom: var(--spacing-md);
+              border-bottom: 1px solid var(--border-color); }
+    .header h1 { font-size: 24px; font-weight: 600; }
+    .refresh-btn { background: var(--accent-color); color: var(--bg-primary); border: none;
+                   padding: 8px 16px; border-radius: 4px; cursor: pointer; font-size: 13px; }
+    .refresh-btn:hover { background: var(--accent-hover); }
+    .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+                  gap: var(--spacing-md); margin-bottom: var(--spacing-lg); }
+    .stat-card { background: var(--bg-secondary); border: 1px solid var(--border-color);
+                 border-radius: var(--card-radius); padding: var(--spacing-md); text-align: center; }
+    .stat-value { font-size: 36px; font-weight: 700; color: var(--accent-color); }
+    .stat-label { color: var(--text-secondary); font-size: 13px; text-transform: uppercase;
+                  letter-spacing: 0.5px; margin-top: var(--spacing-sm); }
+    .section { margin-bottom: var(--spacing-lg); }
+    .section-title { font-size: 18px; font-weight: 600; margin-bottom: var(--spacing-md);
+                     display: flex; align-items: center; gap: var(--spacing-sm); }
+    .section-title::before { content: ''; width: 4px; height: 18px; background: var(--accent-color);
+                              border-radius: 2px; }
+    .card { background: var(--bg-secondary); border: 1px solid var(--border-color);
+            border-radius: var(--card-radius); overflow: hidden; }
+    .card-body { padding: var(--spacing-md); }
+    .actions { display: flex; gap: var(--spacing-sm); flex-wrap: wrap; }
+    .btn { background: var(--bg-secondary); border: 1px solid var(--border-color);
+           color: var(--text-primary); padding: 10px 20px; border-radius: 6px; cursor: pointer;
+           font-size: 14px; display: flex; align-items: center; gap: 8px; transition: all 0.2s; }
+    .btn:hover { background: var(--accent-color); color: var(--bg-primary);
+                 border-color: var(--accent-color); }
+    .btn-primary { background: var(--accent-color); color: var(--bg-primary);
+                   border-color: var(--accent-color); }
+    .list-item { padding: var(--spacing-sm) 0; border-bottom: 1px solid var(--border-color);
+                 display: flex; justify-content: space-between; align-items: center; cursor: pointer; }
+    .list-item:last-child { border-bottom: none; }
+    .list-item:hover { background: var(--vscode-list-hoverBackground); }
+    .list-item-info { flex: 1; }
+    .list-item-title { font-weight: 500; }
+    .list-item-desc { font-size: 12px; color: var(--text-secondary); }
+    .list-item-badge { padding: 2px 8px; border-radius: 4px; font-size: 11px;
+                       background: var(--vscode-badge-background); color: var(--vscode-badge-foreground); }
+    .diagram-container { background: var(--bg-primary); border-radius: var(--card-radius);
+                          padding: var(--spacing-md); display: flex; justify-content: center;
+                          align-items: center; min-height: 300px; }
+    .loading { text-align: center; padding: var(--spacing-lg); color: var(--text-secondary); }
+    .spinner { border: 3px solid var(--border-color); border-top-color: var(--accent-color);
+               border-radius: 50%; width: 40px; height: 40px; animation: spin 1s linear infinite;
+               margin: 0 auto var(--spacing-md); }
+    .empty-state { text-align: center; padding: var(--spacing-lg); color: var(--text-secondary); }
+    @keyframes spin { to { transform: rotate(360deg); } }
   </style>
 </head>
 <body>
   <div class="header">
     <h1>Agent Manager Dashboard</h1>
-    <button class="refresh-btn" onclick="requestRefresh()">🔄 Refresh</button>
+    <button class="refresh-btn" onclick="requestRefresh()">Refresh</button>
   </div>
 
   <div class="stats-grid">
     <div class="stat-card">
       <div class="stat-value" id="totalExperts">-</div>
       <div class="stat-label">Total Experts</div>
-      <div class="stat-breakdown" id="expertBreakdown"></div>
     </div>
     <div class="stat-card">
       <div class="stat-value" id="totalTeams">-</div>
       <div class="stat-label">Active Teams</div>
-      <div class="stat-breakdown" id="teamBreakdown"></div>
     </div>
     <div class="stat-card">
       <div class="stat-value" id="totalMembers">-</div>
@@ -611,18 +390,11 @@ function getDashboardHtml(webview) {
     <div class="card">
       <div class="card-body">
         <div class="actions">
-          <button class="btn btn-primary" onclick="createExpert()">
-            <span>➕</span> Create Expert
-          </button>
-          <button class="btn btn-primary" onclick="buildTeam()">
-            <span>👥</span> Build Team
-          </button>
-          <button class="btn" onclick="editAgent()">
-            <span>✏️</span> Edit Agent
-          </button>
-          <button class="btn" onclick="openSettings()">
-            <span>⚙️</span> Settings
-          </button>
+          <button class="btn btn-primary" onclick="createExpert()">Create Expert</button>
+          <button class="btn btn-primary" onclick="buildTeam()">Build Team</button>
+          <button class="btn" onclick="editAgent()">Edit Agent</button>
+          <button class="btn" onclick="openSpecBrowser()">Spec Browser</button>
+          <button class="btn" onclick="openSettings()">Settings</button>
         </div>
       </div>
     </div>
@@ -640,24 +412,10 @@ function getDashboardHtml(webview) {
   </div>
 
   <div class="section">
-    <h2 class="section-title">Team Structure</h2>
-    <div class="card">
-      <div class="card-body">
-        <div class="diagram-container">
-          <div class="mermaid" id="teamDiagram">Loading diagram...</div>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <div class="section">
     <h2 class="section-title">Experts</h2>
     <div class="card">
       <div class="card-body" id="expertsList">
-        <div class="loading">
-          <div class="spinner"></div>
-          <p>Loading experts...</p>
-        </div>
+        <div class="loading"><div class="spinner"></div><p>Loading experts...</p></div>
       </div>
     </div>
   </div>
@@ -666,164 +424,97 @@ function getDashboardHtml(webview) {
     <h2 class="section-title">Teams</h2>
     <div class="card">
       <div class="card-body" id="teamsList">
-        <div class="loading">
-          <div class="spinner"></div>
-          <p>Loading teams...</p>
-        </div>
+        <div class="loading"><div class="spinner"></div><p>Loading teams...</p></div>
       </div>
     </div>
   </div>
 
   <script nonce="${nonce}">
     const vscode = acquireVsCodeApi();
-    let currentData = null;
 
-    // Initialize Mermaid
     mermaid.initialize({
-      startOnLoad: false,
-      theme: 'base',
+      startOnLoad: false, theme: 'base',
       themeVariables: {
-        primaryColor: '#1f77b4',
-        primaryTextColor: '#fff',
-        primaryBorderColor: '#08519c',
-        lineColor: '#7f8c8d',
-        secondaryColor: '#2ca02c',
-        tertiaryColor: '#34495e',
-        background: 'transparent',
-        mainBkg: '#34495e',
-        nodeBorder: '#2c3e50',
-        clusterBkg: '#34495e',
-        clusterBorder: '#2c3e50',
-        titleColor: '#fff',
-        edgeLabelBackground: '#ecf0f1'
+        primaryColor: '#1f77b4', primaryTextColor: '#fff', primaryBorderColor: '#08519c',
+        lineColor: '#7f8c8d', secondaryColor: '#2ca02c', tertiaryColor: '#34495e',
+        background: 'transparent', mainBkg: '#34495e', nodeBorder: '#2c3e50',
+        titleColor: '#fff'
       },
       securityLevel: 'loose'
     });
 
-    // Request initial data
     requestRefresh();
 
-    function requestRefresh() {
-      vscode.postMessage({ command: 'requestData' });
-    }
+    function requestRefresh() { vscode.postMessage({ command: 'requestData' }); }
 
-    // Handle messages from extension
     window.addEventListener('message', async (event) => {
       const message = event.data;
-
       if (message.command === 'data') {
-        currentData = message.data;
         await renderDashboard(message.data);
       }
     });
 
     async function renderDashboard(data) {
-      const { stats, diagrams, experts, teams, config } = data;
-
-      // Update stats
+      const { stats, diagrams, experts, teams } = data;
       document.getElementById('totalExperts').textContent = stats.experts.total;
       document.getElementById('totalTeams').textContent = stats.teams.total;
       document.getElementById('totalMembers').textContent = stats.teams.totalMembers;
-
-      // Expert breakdown
-      const expertBreakdown = Object.entries(stats.experts.byBackedBy)
-        .map(([k, v]) => \`\${k}: \${v}\`)
-        .join(' | ');
-      document.getElementById('expertBreakdown').textContent = expertBreakdown;
-
-      // Team breakdown
-      const teamBreakdown = \`Upper: \${stats.teams.upper} | Lower: \${stats.teams.lower}\`;
-      document.getElementById('teamBreakdown').textContent = teamBreakdown;
-
-      // Render diagrams
       await renderMermaidDiagram('overviewDiagram', diagrams.overview);
-      await renderMermaidDiagram('teamDiagram', diagrams.teams);
-
-      // Render experts list
       renderExpertsList(experts);
-
-      // Render teams list
       renderTeamsList(teams);
     }
 
     async function renderMermaidDiagram(elementId, mermaidCode) {
       const element = document.getElementById(elementId);
       try {
-        const { svg } = await mermaid.render(\`\${elementId}-svg\`, mermaidCode);
+        const { svg } = await mermaid.render(elementId + '-svg', mermaidCode);
         element.innerHTML = svg;
       } catch (error) {
-        element.innerHTML = \`<p>Diagram error: \${error.message}</p>\`;
+        element.innerHTML = '<p>Diagram error: ' + error.message + '</p>';
       }
     }
 
     function renderExpertsList(experts) {
       const container = document.getElementById('expertsList');
-
       if (experts.length === 0) {
-        container.innerHTML = '<div class="empty-state">No experts configured. Click "Create Expert" to get started.</div>';
+        container.innerHTML = '<div class="empty-state">No experts configured.</div>';
         return;
       }
-
       container.innerHTML = experts.map(expert => \`
         <div class="list-item" onclick="openExpert('\${expert.slug}')">
           <div class="list-item-info">
-            <div class="list-item-title">
-              \${expert.role}
-              <span class="domain-tag domain-\${expert.domain}">\${expert.domain}</span>
-              <span class="tier-tag tier-\${expert.tier}">\${expert.tier}</span>
-            </div>
-            <div class="list-item-desc">\${expert.slug} • \${expert.backed_by}</div>
+            <div class="list-item-title">\${expert.role}</div>
+            <div class="list-item-desc">\${expert.slug} · \${expert.backed_by} · \${expert.tier}</div>
           </div>
-          <div class="list-item-badge">\${expert.capabilities?.length || 0} capabilities</div>
+          <div class="list-item-badge">\${(expert.specs || expert.capabilities || []).length} specs</div>
         </div>
       \`).join('');
     }
 
     function renderTeamsList(teams) {
       const container = document.getElementById('teamsList');
-
       if (teams.length === 0) {
-        container.innerHTML = '<div class="empty-state">No teams configured. Click "Build Team" to get started.</div>';
+        container.innerHTML = '<div class="empty-state">No teams configured.</div>';
         return;
       }
-
       container.innerHTML = teams.map(team => \`
         <div class="list-item" onclick="openTeam('\${team.slug}')">
           <div class="list-item-info">
-            <div class="list-item-title">
-              \${team.name}
-              <span class="list-item-badge">\${team.type}</span>
-            </div>
-            <div class="list-item-desc">\${team.purpose?.substring(0, 80) || 'No description'}\${team.purpose?.length > 80 ? '...' : ''}</div>
+            <div class="list-item-title">\${team.name} <span class="list-item-badge">\${team.type}</span></div>
+            <div class="list-item-desc">\${(team.purpose || '').substring(0, 80)}</div>
           </div>
           <div class="list-item-badge">\${team.members.length} members</div>
         </div>
       \`).join('');
     }
 
-    function createExpert() {
-      vscode.postMessage({ command: 'createExpert' });
-    }
-
-    function buildTeam() {
-      vscode.postMessage({ command: 'buildTeam' });
-    }
-
-    function editAgent() {
-      vscode.postMessage({ command: 'editAgent' });
-    }
-
-    function openSettings() {
-      vscode.postMessage({ command: 'openSettings' });
-    }
-
-    function openExpert(slug) {
-      vscode.postMessage({ command: 'openExpert', slug });
-    }
-
-    function openTeam(slug) {
-      vscode.postMessage({ command: 'openTeam', slug });
-    }
+    function createExpert() { vscode.postMessage({ command: 'createExpert' }); }
+    function buildTeam() { vscode.postMessage({ command: 'buildTeam' }); }
+    function editAgent() { vscode.postMessage({ command: 'editAgent' }); }
+    function openSettings() { vscode.postMessage({ command: 'openSettings' }); }
+    function openSpecBrowser() { vscode.postMessage({ command: 'openSpecBrowser' }); }
+    function openExpert(slug) { vscode.postMessage({ command: 'openExpert', slug }); }
+    function openTeam(slug) { vscode.postMessage({ command: 'openTeam', slug }); }
   </script>
 </body>
 </html>`;
@@ -834,49 +525,23 @@ function getDiagramViewerHtml(mermaidCode) {
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'nonce-${nonce}'; style-src 'unsafe-inline';">
-  <title>Diagram Viewer</title>
   <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js" nonce="${nonce}"></script>
   <style>
-    body {
-      font-family: var(--vscode-font-family);
-      background: var(--vscode-editor-background);
-      color: var(--vscode-editor-foreground);
-      margin: 0;
-      padding: 20px;
-      display: flex;
-      justify-content: center;
-      align-items: center;
-      min-height: 100vh;
-    }
-    .mermaid {
-      background: var(--vscode-editor-background);
-    }
+    body { font-family: var(--vscode-font-family); background: var(--vscode-editor-background);
+           color: var(--vscode-editor-foreground); margin: 0; padding: 20px;
+           display: flex; justify-content: center; align-items: center; min-height: 100vh; }
+    .mermaid { background: var(--vscode-editor-background); }
   </style>
 </head>
 <body>
   <div class="mermaid">${mermaidCode}</div>
   <script nonce="${nonce}">
-    mermaid.initialize({
-      startOnLoad: true,
-      theme: 'base',
-      themeVariables: {
-        primaryColor: '#1f77b4',
-        primaryTextColor: '#fff',
-        primaryBorderColor: '#08519c',
-        lineColor: '#7f8c8d',
-        secondaryColor: '#2ca02c',
-        tertiaryColor: '#34495e',
-        background: 'transparent'
-      },
-      securityLevel: 'loose'
-    });
+    mermaid.initialize({ startOnLoad: true, theme: 'base', securityLevel: 'loose' });
   </script>
 </body>
 </html>`;
 }
-// getNonce moved to utils/webview.ts
 
 
 /***/ }),
@@ -893,8 +558,7 @@ module.exports = require("vscode");
 /**
  * AgentTreeProvider - Tree view provider for Agent Manager sidebar
  *
- * Displays teams, experts, agents, and configuration in a hierarchical tree.
- * Enhanced with context menus, icons, and click handlers.
+ * Displays teams, experts, templates, and configuration in a hierarchical tree.
  */
 var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
     if (k2 === undefined) k2 = k;
@@ -933,13 +597,17 @@ Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.AgentTreeProvider = void 0;
 exports.registerTreeCommands = registerTreeCommands;
 const vscode = __importStar(__webpack_require__(1));
+const fs = __importStar(__webpack_require__(3));
+const path = __importStar(__webpack_require__(4));
 class AgentTreeProvider {
     fileService;
+    templateService;
     extensionContext;
     _onDidChangeTreeData = new vscode.EventEmitter();
     onDidChangeTreeData = this._onDidChangeTreeData.event;
-    constructor(fileService, extensionContext) {
+    constructor(fileService, templateService, extensionContext) {
         this.fileService = fileService;
+        this.templateService = templateService;
         this.extensionContext = extensionContext;
     }
     refresh() {
@@ -950,39 +618,42 @@ class AgentTreeProvider {
     }
     async getChildren(element) {
         if (!element) {
-            // Root level items
             return this.getRootItems();
         }
         switch (element.contextValue) {
-            case 'teams':
-                return this.getTeamItems();
-            case 'experts':
-                return this.getExpertItems();
-            case 'modules':
-                return this.getModuleItems();
-            case 'config':
-                return this.getConfigItems();
-            case 'team':
-                return this.getTeamMembers(element.metadata?.id);
-            default:
-                return [];
+            case 'teams': return this.getTeamItems();
+            case 'experts': return this.getExpertItems();
+            case 'templates': return this.getTemplateRootItems();
+            case 'specs-root': return this.getTypeSpecItems('spec');
+            case 'platforms-root': return this.getTypeSpecItems('platform');
+            case 'policies-root': return this.getTypeSpecItems('policy');
+            case 'base-root': return this.getTypeSpecItems('base');
+            case 'config': return this.getConfigItems();
+            case 'team': return this.getTeamMembers(element.metadata?.id);
+            default: return [];
         }
     }
+    // ==========================================================================
+    // Root
+    // ==========================================================================
     async getRootItems() {
-        const items = [
+        const config = await this.fileService.readDomainConfig();
+        const hasSetup = config.success && config.data;
+        return [
             new TreeItem('Teams', vscode.TreeItemCollapsibleState.Collapsed, 'teams', 'account-group', { description: 'All configured teams' }),
             new TreeItem('Experts', vscode.TreeItemCollapsibleState.Collapsed, 'experts', 'symbol-namespace', { description: 'All expert definitions' }),
-            new TreeItem('Modules', vscode.TreeItemCollapsibleState.Collapsed, 'modules', 'library', { description: 'Agent modules and components' }),
+            new TreeItem('Templates', vscode.TreeItemCollapsibleState.Collapsed, 'templates', 'library', { description: hasSetup ? 'user + project scope' : 'user scope only',
+                tooltip: 'Spec modules, platforms, policies' }),
             new TreeItem('Configuration', vscode.TreeItemCollapsibleState.Collapsed, 'config', 'settings-gear', { description: 'Domain and project settings' })
         ];
-        return items;
     }
+    // ==========================================================================
+    // Teams
+    // ==========================================================================
     async getTeamItems() {
         const result = await this.fileService.listTeams();
         if (!result.success || !result.data || result.data.length === 0) {
-            return [
-                new TreeItem('No teams configured', vscode.TreeItemCollapsibleState.None, 'empty', 'warning')
-            ];
+            return [new TreeItem('No teams configured', vscode.TreeItemCollapsibleState.None, 'empty', 'warning')];
         }
         return result.data.map(team => {
             const icon = team.type === 'upper' ? 'server' : 'server-environment';
@@ -991,23 +662,18 @@ class AgentTreeProvider {
                 tooltip: this.getTeamTooltip(team),
                 metadata: { id: team.slug, name: team.name }
             });
-            // Add context value for command handling
-            item.command = {
-                command: 'agentManager.viewTeamDetails',
-                title: 'View Team Details',
-                arguments: [team.slug]
-            };
+            item.command = { command: 'agentManager.viewTeamDetails', title: 'View Team Details', arguments: [team.slug] };
             return item;
         });
     }
+    // ==========================================================================
+    // Experts
+    // ==========================================================================
     async getExpertItems() {
         const result = await this.fileService.listExperts();
         if (!result.success || !result.data || result.data.length === 0) {
-            return [
-                new TreeItem('No experts defined', vscode.TreeItemCollapsibleState.None, 'empty', 'warning')
-            ];
+            return [new TreeItem('No experts defined', vscode.TreeItemCollapsibleState.None, 'empty', 'warning')];
         }
-        // Group by domain
         const byDomain = result.data.reduce((acc, expert) => {
             if (!acc[expert.domain]) {
                 acc[expert.domain] = [];
@@ -1017,172 +683,170 @@ class AgentTreeProvider {
         }, {});
         const items = [];
         Object.entries(byDomain).forEach(([domain, experts]) => {
-            // Domain folder
-            const domainIcon = domain === 'development' ? 'code' : 'globe';
-            const domainItem = new TreeItem(domain.charAt(0).toUpperCase() + domain.slice(1), vscode.TreeItemCollapsibleState.Expanded, 'domain-folder', domainIcon, { description: `${experts.length} experts` });
+            const domainItem = new TreeItem(domain.charAt(0).toUpperCase() + domain.slice(1), vscode.TreeItemCollapsibleState.Expanded, 'domain-folder', domain === 'development' ? 'code' : 'globe', { description: `${experts.length} experts` });
             items.push(domainItem);
-            // Add experts for this domain
             experts.forEach(expert => {
+                const specCount = expert.specs?.length ?? 0;
                 const item = new TreeItem(expert.role, vscode.TreeItemCollapsibleState.None, 'expert', this.getExpertIcon(expert), {
-                    description: expert.slug,
+                    description: `${expert.slug}${specCount > 0 ? ` · ${specCount} specs` : ''}`,
                     tooltip: this.getExpertTooltip(expert),
                     metadata: { slug: expert.slug, role: expert.role }
                 });
-                // Add tier badge
-                item.resourceUri = vscode.Uri.parse(`tier://${expert.tier}`);
-                // Make clickable
-                item.command = {
-                    command: 'agentManager.openExpert',
-                    title: 'Open Expert',
-                    arguments: [expert.slug]
-                };
+                item.command = { command: 'agentManager.openExpert', title: 'Open Expert', arguments: [expert.slug] };
                 items.push(item);
             });
         });
         return items;
     }
-    async getModuleItems() {
-        const modules = [
-            {
-                name: 'Base',
-                desc: 'Role cores',
-                icon: 'circle-outline',
-                path: 'agent-library/base'
-            },
-            {
-                name: 'Capabilities',
-                desc: 'Feature modules',
-                icon: 'extensions',
-                path: 'agent-library/capabilities'
-            },
-            {
-                name: 'Platforms',
-                desc: 'Execution environments',
-                icon: 'server',
-                path: 'agent-library/platforms'
-            },
-            {
-                name: 'Policies',
-                desc: 'Project rules',
-                icon: 'file-code',
-                path: 'agent-library/policies'
-            }
-        ];
-        return modules.map(mod => new TreeItem(mod.name, vscode.TreeItemCollapsibleState.None, 'module-folder', mod.icon, { description: mod.desc, metadata: { path: mod.path } }));
-    }
-    async getConfigItems() {
-        const config = await this.fileService.readDomainConfig();
-        const items = [
-            new TreeItem('Domain', vscode.TreeItemCollapsibleState.None, 'config-item', 'globe', {
-                description: config.data?.domain || 'Not set',
-                metadata: { key: 'domain' }
-            }),
-            new TreeItem('Project', vscode.TreeItemCollapsibleState.None, 'config-item', 'project', {
-                description: config.data?.project_name || 'Not set',
-                metadata: { key: 'project' }
-            }),
-            new TreeItem('Active Packs', vscode.TreeItemCollapsibleState.None, 'config-item', 'package', {
-                description: config.data?.active_packs?.length.toString() || '0',
-                metadata: { key: 'packs' }
-            }),
-            new TreeItem('Relay Root', vscode.TreeItemCollapsibleState.None, 'config-item', 'folder-opened', {
-                description: this.fileService.getRelayRoot(),
-                metadata: { key: 'root' }
-            })
-        ];
+    // ==========================================================================
+    // Templates
+    // ==========================================================================
+    async getTemplateRootItems() {
+        const allSpecs = await this.templateService.listSpecs();
+        const countByType = (type) => allSpecs.filter(s => s.effective.type === type).length;
+        const projectCount = (type) => allSpecs.filter(s => s.effective.type === type && (s.effective.scope === 'project' || s.overridden_by === 'project')).length;
+        const items = [];
+        // Specs node (always shown)
+        const specTotal = countByType('spec');
+        items.push(new TreeItem('Specs', vscode.TreeItemCollapsibleState.Collapsed, 'specs-root', 'extensions', {
+            description: specTotal > 0
+                ? `${specTotal} total · ${projectCount('spec')} project`
+                : 'empty',
+            metadata: { type: 'spec' }
+        }));
+        // Platforms
+        const platformTotal = countByType('platform');
+        items.push(new TreeItem('Platforms', platformTotal > 0 ? vscode.TreeItemCollapsibleState.Collapsed : vscode.TreeItemCollapsibleState.None, 'platforms-root', 'server', { description: `${platformTotal} total · ${projectCount('platform')} project` }));
+        // Policies
+        const policyTotal = countByType('policy');
+        items.push(new TreeItem('Policies', policyTotal > 0 ? vscode.TreeItemCollapsibleState.Collapsed : vscode.TreeItemCollapsibleState.None, 'policies-root', 'file-code', { description: `${policyTotal} total · ${projectCount('policy')} project` }));
         return items;
     }
+    async getTypeSpecItems(type) {
+        const allSpecs = await this.templateService.listSpecs(type);
+        if (allSpecs.length === 0) {
+            return [new TreeItem(`No ${type}s available`, vscode.TreeItemCollapsibleState.None, 'empty', 'warning')];
+        }
+        return allSpecs.map(resolved => {
+            const { effective, overridden_by } = resolved;
+            const isProject = effective.scope === 'project';
+            const isOverride = overridden_by === 'project';
+            const badge = isProject ? '[P]' : '[U]';
+            const icon = isProject ? 'file-code' : 'file';
+            const contextValue = isProject ? 'spec-project' : 'spec-user';
+            const tags = effective.tags?.length ? effective.tags.slice(0, 2).join(', ') : '';
+            const item = new TreeItem(`${badge} ${effective.id}`, vscode.TreeItemCollapsibleState.None, contextValue, icon, {
+                description: tags || undefined,
+                tooltip: this.getSpecTooltip(resolved),
+                metadata: { id: effective.id, type: effective.type }
+            });
+            if (isOverride) {
+                item.resourceUri = vscode.Uri.parse(`spec-override://${effective.id}`);
+            }
+            // Pass both id and type so commands can find the correct file path
+            item.command = {
+                command: isProject ? 'agentManager.editProjectSpec' : 'agentManager.viewUserSpec',
+                title: isProject ? 'Edit Spec' : 'View Spec',
+                arguments: [effective.id, effective.type]
+            };
+            return item;
+        });
+    }
+    // ==========================================================================
+    // Config
+    // ==========================================================================
+    async getConfigItems() {
+        const config = await this.fileService.readDomainConfig();
+        const hasUserScope = this.templateService.hasUserScope();
+        return [
+            new TreeItem('Domain', vscode.TreeItemCollapsibleState.None, 'config-item', 'globe', { description: config.data?.domain || 'Not set' }),
+            new TreeItem('Project', vscode.TreeItemCollapsibleState.None, 'config-item', 'project', { description: config.data?.project_name || 'Not set' }),
+            new TreeItem('Active Packs', vscode.TreeItemCollapsibleState.None, 'config-item', 'package', { description: String(config.data?.active_packs?.length ?? 0) }),
+            new TreeItem('Plugin (user scope)', vscode.TreeItemCollapsibleState.None, 'config', 'folder-opened', { description: hasUserScope ? this.templateService.getPluginRoot() ?? 'found' : 'not detected' }),
+            new TreeItem('Relay Root', vscode.TreeItemCollapsibleState.None, 'config-item', 'folder', { description: this.fileService.getRelayRoot() })
+        ];
+    }
+    // ==========================================================================
+    // Team Members
+    // ==========================================================================
     async getTeamMembers(teamId) {
         if (!teamId) {
             return [];
         }
         const result = await this.fileService.readTeam(teamId);
         if (!result.success || !result.data) {
-            return [
-                new TreeItem('Failed to load team', vscode.TreeItemCollapsibleState.None, 'error', 'error')
-            ];
+            return [new TreeItem('Failed to load team', vscode.TreeItemCollapsibleState.None, 'error', 'error')];
         }
         const team = result.data;
-        const items = [];
-        // Coordinator
-        items.push(new TreeItem(`Coordinator: ${team.coordinator}`, vscode.TreeItemCollapsibleState.None, 'coordinator', 'star-full', {
-            description: team.coordinator_model,
-            tooltip: `Decision mode: ${team.decision_mode}`
-        }));
-        // Separator
-        items.push(new TreeItem('Members', vscode.TreeItemCollapsibleState.None, 'separator', 'separator'));
-        // Team members
+        const items = [
+            new TreeItem(`Coordinator: ${team.coordinator}`, vscode.TreeItemCollapsibleState.None, 'coordinator', 'star-full', { description: team.coordinator_model, tooltip: `Decision mode: ${team.decision_mode}` })
+        ];
         team.members.forEach(member => {
             const icon = member.is_leader ? 'star-full' : 'person';
             const item = new TreeItem(member.role, vscode.TreeItemCollapsibleState.None, 'team-member', icon, {
-                description: `${member.expert_slug}${member.is_bridge ? ' 🌉' : ''}`,
+                description: `${member.expert_slug}${member.is_bridge ? ' [bridge]' : ''}`,
                 tooltip: this.getMemberTooltip(member),
-                metadata: {
-                    expertSlug: member.expert_slug,
-                    role: member.role,
-                    teamSlug: team.slug
-                }
+                metadata: { expertSlug: member.expert_slug, role: member.role, teamSlug: team.slug }
             });
-            if (member.is_bridge) {
-                item.resourceUri = vscode.Uri.parse('bridge://true');
-            }
             items.push(item);
         });
         return items;
     }
     // ==========================================================================
-    // Tooltip Helpers
+    // Tooltips
     // ==========================================================================
     getTeamTooltip(team) {
-        const lines = [
-            `**${team.name}**`,
-            '',
-            `Type: ${team.type}`,
-            `Mode: ${team.execution_mode}`,
+        return [
+            `**${team.name}**`, '',
+            `Type: ${team.type}`, `Mode: ${team.execution_mode}`,
             `Coordinator: ${team.coordinator} (${team.coordinator_model})`,
-            `Decision: ${team.decision_mode}`,
-            '',
+            `Decision: ${team.decision_mode}`, '',
             `Members: ${team.members.length}`,
             team.purpose ? `Purpose: ${team.purpose}` : ''
-        ].filter(Boolean);
-        return lines.join('\n');
+        ].filter(Boolean).join('\n');
     }
     getExpertTooltip(expert) {
-        const lines = [
-            `**${expert.role}**`,
-            '',
-            `Slug: \`${expert.slug}\``,
-            `Domain: ${expert.domain}`,
-            `Tier: ${expert.tier}`,
-            `Backed by: ${expert.backed_by}`,
-            `Permission: ${expert.permission_mode}`,
-            '',
-            `Capabilities: ${expert.capabilities?.length || 0}`,
+        return [
+            `**${expert.role}**`, '',
+            `Slug: \`${expert.slug}\``, `Domain: ${expert.domain}`,
+            `Tier: ${expert.tier}`, `Backed by: ${expert.backed_by}`,
+            `Permission: ${expert.permission_mode}`, '',
+            `Specs: ${expert.specs?.length ?? 0}`,
             `Phases: ${expert.phases?.join(', ') || 'none'}`
+        ].join('\n');
+    }
+    getSpecTooltip(resolved) {
+        const { effective, overridden_by } = resolved;
+        const lines = [
+            `**${effective.id}**`,
+            `Type: ${effective.type}`,
+            `Scope: ${effective.scope}`,
+            `Version: ${effective.version}`,
+            `Tags: ${effective.tags?.join(', ') || 'none'}`
         ];
-        if (expert.isolation) {
-            lines.push(`Isolation: ${expert.isolation}`);
+        if (overridden_by === 'project') {
+            lines.push('', '[P] This project-scope spec overrides the user-scope version');
+        }
+        if (effective.requires?.length) {
+            lines.push(`Requires: ${effective.requires.join(', ')}`);
         }
         return lines.join('\n');
     }
     getMemberTooltip(member) {
         const lines = [
-            `**${member.role}**`,
-            '',
+            `**${member.role}**`, '',
             `Expert: ${member.expert_slug}`,
-            `Tier: ${member.tier}`,
-            `Permission: ${member.permission_mode}`
+            `Tier: ${member.tier}`, `Permission: ${member.permission_mode}`
         ];
         if (member.is_leader) {
-            lines.push('⭐ Team Leader');
+            lines.push('Team Leader');
         }
         if (member.is_bridge) {
-            lines.push('🌉 Bridge Agent');
+            lines.push('Bridge Agent');
         }
         return lines.join('\n');
     }
     getExpertIcon(expert) {
-        // Return icon based on backed_by property
         const iconMap = {
             'claude': 'symbol-namespace',
             'codex': 'symbol-interface',
@@ -1193,9 +857,9 @@ class AgentTreeProvider {
     }
 }
 exports.AgentTreeProvider = AgentTreeProvider;
-/**
- * Custom TreeItem with extended metadata support
- */
+// ==========================================================================
+// TreeItem
+// ==========================================================================
 class TreeItem extends vscode.TreeItem {
     label;
     collapsibleState;
@@ -1220,39 +884,26 @@ class TreeItem extends vscode.TreeItem {
             this.metadata = options.metadata;
         }
     }
-    withDescription(desc) {
-        this.description = desc;
-        return this;
-    }
 }
-/**
- * Register all tree item context menu commands
- */
-function registerTreeCommands(context, fileService) {
-    // Expert context menu
-    context.subscriptions.push(vscode.commands.registerCommand('agentManager.openExpert', async (slug) => {
-        // Open Expert Manager for editing
+// ==========================================================================
+// Tree Commands
+// ==========================================================================
+function registerTreeCommands(context, fileService, templateService) {
+    // Expert commands
+    context.subscriptions.push(vscode.commands.registerCommand('agentManager.openExpert', (slug) => {
         vscode.commands.executeCommand('agentManager.editAgent', slug);
-    }));
-    // Team context menu
-    context.subscriptions.push(vscode.commands.registerCommand('agentManager.viewTeamDetails', async (slug) => {
+    }), vscode.commands.registerCommand('agentManager.viewTeamDetails', (slug) => {
         vscode.commands.executeCommand('agentManager.viewTeamDiagram', slug);
-    }));
-    // Create expert from context menu
-    context.subscriptions.push(vscode.commands.registerCommand('agentManager.createExpertFromTree', async () => {
+    }), vscode.commands.registerCommand('agentManager.createExpertFromTree', () => {
         vscode.commands.executeCommand('agentManager.createExpert');
-    }));
-    // Build team from context menu
-    context.subscriptions.push(vscode.commands.registerCommand('agentManager.buildTeamFromTree', async () => {
+    }), vscode.commands.registerCommand('agentManager.buildTeamFromTree', () => {
         vscode.commands.executeCommand('agentManager.buildTeam');
-    }));
-    // Refresh from context menu
-    context.subscriptions.push(vscode.commands.registerCommand('agentManager.refreshFromTree', async () => {
+    }), vscode.commands.registerCommand('agentManager.refreshFromTree', () => {
         vscode.commands.executeCommand('agentManager.refreshTree');
     }));
-    // Delete expert
+    // Expert CRUD
     context.subscriptions.push(vscode.commands.registerCommand('agentManager.deleteExpert', async (slug) => {
-        const confirmed = await vscode.window.showWarningMessage(`Delete expert "${slug}"? This action cannot be undone.`, 'Delete', 'Cancel');
+        const confirmed = await vscode.window.showWarningMessage(`Delete expert "${slug}"? This cannot be undone.`, 'Delete', 'Cancel');
         if (confirmed === 'Delete') {
             const result = await fileService.deleteExpert(slug);
             if (result.success) {
@@ -1263,10 +914,8 @@ function registerTreeCommands(context, fileService) {
                 vscode.window.showErrorMessage(`Failed to delete expert: ${result.error}`);
             }
         }
-    }));
-    // Delete team
-    context.subscriptions.push(vscode.commands.registerCommand('agentManager.deleteTeam', async (slug) => {
-        const confirmed = await vscode.window.showWarningMessage(`Delete team "${slug}"? This action cannot be undone.`, 'Delete', 'Cancel');
+    }), vscode.commands.registerCommand('agentManager.deleteTeam', async (slug) => {
+        const confirmed = await vscode.window.showWarningMessage(`Delete team "${slug}"? This cannot be undone.`, 'Delete', 'Cancel');
         if (confirmed === 'Delete') {
             const result = await fileService.deleteTeam(slug);
             if (result.success) {
@@ -1277,9 +926,7 @@ function registerTreeCommands(context, fileService) {
                 vscode.window.showErrorMessage(`Failed to delete team: ${result.error}`);
             }
         }
-    }));
-    // Duplicate expert
-    context.subscriptions.push(vscode.commands.registerCommand('agentManager.duplicateExpert', async (slug) => {
+    }), vscode.commands.registerCommand('agentManager.duplicateExpert', async (slug) => {
         const result = await fileService.readExpert(slug);
         if (!result.success || !result.data) {
             vscode.window.showErrorMessage(`Expert not found: ${slug}`);
@@ -1287,7 +934,6 @@ function registerTreeCommands(context, fileService) {
         }
         const newSlug = await vscode.window.showInputBox({
             prompt: 'Enter new expert slug',
-            placeHolder: `${slug}-copy`,
             value: `${slug}-copy`
         });
         if (!newSlug) {
@@ -1302,22 +948,96 @@ function registerTreeCommands(context, fileService) {
         else {
             vscode.window.showErrorMessage(`Failed to duplicate expert: ${createResult.error}`);
         }
-    }));
-    // Open relay folder
-    context.subscriptions.push(vscode.commands.registerCommand('agentManager.openRelayFolder', async () => {
+    }), vscode.commands.registerCommand('agentManager.openRelayFolder', async () => {
         const relayRoot = fileService.getRelayRoot();
-        const uri = vscode.Uri.file(relayRoot);
-        await vscode.commands.executeCommand('vscode.openFolder', uri, { forceNewWindow: false });
+        await vscode.commands.executeCommand('revealFileInOS', vscode.Uri.file(relayRoot));
     }));
-    // View diagram for expert
-    context.subscriptions.push(vscode.commands.registerCommand('agentManager.viewExpertDiagram', async (slug) => {
-        vscode.commands.executeCommand('agentManager.viewExpertDiagram', slug);
+    // Spec commands
+    context.subscriptions.push(vscode.commands.registerCommand('agentManager.forkSpec', async (specId, _type) => {
+        try {
+            await templateService.forkToProject(specId);
+            vscode.window.showInformationMessage(`Spec "${specId}" forked to project scope.`);
+            vscode.commands.executeCommand('agentManager.refreshTree');
+        }
+        catch (err) {
+            vscode.window.showErrorMessage(`Fork failed: ${err}`);
+        }
+    }), vscode.commands.registerCommand('agentManager.deleteProjectSpec', async (specId, type) => {
+        const confirmed = await vscode.window.showWarningMessage(`Delete project spec "${specId}"?`, 'Delete', 'Cancel');
+        if (confirmed === 'Delete') {
+            await templateService.deleteProjectSpec(specId, type ?? 'spec');
+            vscode.window.showInformationMessage(`Spec "${specId}" deleted.`);
+            vscode.commands.executeCommand('agentManager.refreshTree');
+        }
+    }), vscode.commands.registerCommand('agentManager.editProjectSpec', async (specId, type) => {
+        const specType = type ?? 'spec';
+        const dir = fileService.getProjectDirForType(specType);
+        const filePath = `${dir}/${specId}.md`;
+        await vscode.window.showTextDocument(vscode.Uri.file(filePath));
+    }), vscode.commands.registerCommand('agentManager.viewUserSpec', async (specId, type) => {
+        const pluginRoot = templateService.getPluginRoot();
+        if (!pluginRoot) {
+            vscode.window.showWarningMessage('User scope (relay-plugin) not detected.');
+            return;
+        }
+        const subDir = userScopeSubDir(type ?? 'spec', pluginRoot);
+        const filePath = `${pluginRoot}/docs/templates/modules/${subDir}/${specId}.md`;
+        const uri = vscode.Uri.file(filePath);
+        await vscode.window.showTextDocument(uri, { preview: true });
+    }), vscode.commands.registerCommand('agentManager.diffSpec', async (specId, type) => {
+        const pluginRoot = templateService.getPluginRoot();
+        if (!pluginRoot) {
+            vscode.window.showWarningMessage('User scope (relay-plugin) not detected.');
+            return;
+        }
+        const specType = type ?? 'spec';
+        const subDir = userScopeSubDir(specType, pluginRoot);
+        const userUri = vscode.Uri.file(`${pluginRoot}/docs/templates/modules/${subDir}/${specId}.md`);
+        const projectUri = vscode.Uri.file(`${fileService.getProjectDirForType(specType)}/${specId}.md`);
+        await vscode.commands.executeCommand('vscode.diff', userUri, projectUri, `${specId}: user scope ↔ project scope`);
     }));
+}
+// ==========================================================================
+// Helpers
+// ==========================================================================
+/**
+ * Map SpecType to user scope subdirectory name inside modules/.
+ * Older plugin installs use 'capabilities/' instead of 'specs/'.
+ */
+function userScopeSubDir(type, pluginRoot) {
+    if (type === 'platform') {
+        return 'platforms';
+    }
+    if (type === 'policy') {
+        return 'policies';
+    }
+    if (type === 'base') {
+        return 'base';
+    }
+    if (pluginRoot) {
+        const specsDir = path.join(pluginRoot, 'docs', 'templates', 'modules', 'specs');
+        if (!fs.existsSync(specsDir)) {
+            return 'capabilities';
+        }
+    }
+    return 'specs';
 }
 
 
 /***/ }),
 /* 3 */
+/***/ ((module) => {
+
+module.exports = require("fs");
+
+/***/ }),
+/* 4 */
+/***/ ((module) => {
+
+module.exports = require("path");
+
+/***/ }),
+/* 5 */
 /***/ (function(__unused_webpack_module, exports, __webpack_require__) {
 
 
@@ -1325,7 +1045,7 @@ function registerTreeCommands(context, fileService) {
  * FileService - Core file operations for relay-plugin data
  *
  * Handles reading/writing expert definitions, team configurations,
- * agent definitions, and domain config from .claude/relay/ directory.
+ * spec modules, and domain config from .claude/relay/ directory.
  */
 var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
     if (k2 === undefined) k2 = k;
@@ -1364,8 +1084,9 @@ Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.fileService = exports.FileService = void 0;
 const vscode = __importStar(__webpack_require__(1));
 const path = __importStar(__webpack_require__(4));
-const fs = __importStar(__webpack_require__(5));
+const fs = __importStar(__webpack_require__(3));
 const yaml = __importStar(__webpack_require__(6));
+const slugify_1 = __webpack_require__(80);
 class FileService {
     workspaceRoot;
     relayRoot;
@@ -1391,6 +1112,37 @@ class FileService {
     getDomainConfigPath() {
         return path.join(this.relayRoot, 'domain-config.json');
     }
+    /** Project scope template root: {workspace}/.claude/relay/templates/ */
+    getProjectTemplatesRoot() {
+        return path.join(this.relayRoot, 'templates');
+    }
+    getProjectSpecsDir() {
+        return path.join(this.relayRoot, 'templates', 'modules', 'specs');
+    }
+    getProjectPlatformsDir() {
+        return path.join(this.relayRoot, 'templates', 'modules', 'platforms');
+    }
+    getProjectPoliciesDir() {
+        return path.join(this.relayRoot, 'templates', 'modules', 'policies');
+    }
+    getProjectBaseDir() {
+        return path.join(this.relayRoot, 'templates', 'modules', 'base');
+    }
+    getProjectDefinitionsDir() {
+        return path.join(this.relayRoot, 'templates', 'definitions');
+    }
+    /** Return the project-scope directory for a given spec type */
+    getProjectDirForType(type) {
+        switch (type) {
+            case 'platform': return this.getProjectPlatformsDir();
+            case 'policy': return this.getProjectPoliciesDir();
+            case 'base': return this.getProjectBaseDir();
+            default: return this.getProjectSpecsDir();
+        }
+    }
+    getNotifyEventsDir() {
+        return path.join(this.relayRoot, 'notify', 'events');
+    }
     // ==========================================================================
     // Expert Operations
     // ==========================================================================
@@ -1403,7 +1155,6 @@ class FileService {
             const files = fs.readdirSync(expertsDir).filter(f => f.endsWith('.md'));
             const experts = [];
             for (const file of files) {
-                const filePath = path.join(expertsDir, file);
                 const expert = await this.readExpert(path.parse(file).name);
                 if (expert.success && expert.data) {
                     experts.push(expert.data);
@@ -1433,7 +1184,6 @@ class FileService {
     async createExpert(expert) {
         try {
             const filePath = path.join(this.getExpertsDir(), `${expert.slug}.md`);
-            // Ensure directory exists
             if (!fs.existsSync(this.getExpertsDir())) {
                 fs.mkdirSync(this.getExpertsDir(), { recursive: true });
             }
@@ -1467,6 +1217,154 @@ class FileService {
             }
             fs.unlinkSync(filePath);
             return { success: true };
+        }
+        catch (error) {
+            return { success: false, error: String(error) };
+        }
+    }
+    // ==========================================================================
+    // Project Scope Spec Operations
+    // ==========================================================================
+    async listProjectSpecs() {
+        try {
+            const typeDirs = [
+                { dir: this.getProjectSpecsDir(), type: 'spec' },
+                { dir: this.getProjectPlatformsDir(), type: 'platform' },
+                { dir: this.getProjectPoliciesDir(), type: 'policy' },
+                { dir: this.getProjectBaseDir(), type: 'base' }
+            ];
+            const specs = [];
+            for (const { dir, type } of typeDirs) {
+                if (!fs.existsSync(dir)) {
+                    continue;
+                }
+                const files = fs.readdirSync(dir).filter(f => f.endsWith('.md'));
+                for (const file of files) {
+                    const result = await this.readProjectSpec(path.parse(file).name, type);
+                    if (result.success && result.data) {
+                        specs.push(result.data);
+                    }
+                }
+            }
+            return { success: true, data: specs };
+        }
+        catch (error) {
+            return { success: false, error: String(error) };
+        }
+    }
+    async readProjectSpec(id, type = 'spec') {
+        try {
+            const dir = this.getProjectDirForType(type);
+            const filePath = path.join(dir, `${id}.md`);
+            if (!fs.existsSync(filePath)) {
+                return { success: false, error: `Project spec not found: ${id}` };
+            }
+            const content = fs.readFileSync(filePath, 'utf-8');
+            const spec = this.parseSpecMarkdown(content, 'project');
+            spec.id = id;
+            return { success: true, data: spec };
+        }
+        catch (error) {
+            return { success: false, error: String(error) };
+        }
+    }
+    async writeProjectSpec(id, spec) {
+        try {
+            const dir = this.getProjectDirForType(spec.type);
+            if (!fs.existsSync(dir)) {
+                fs.mkdirSync(dir, { recursive: true });
+            }
+            const content = this.generateSpecMarkdown({ ...spec, scope: 'project' });
+            fs.writeFileSync(path.join(dir, `${id}.md`), content, 'utf-8');
+            return { success: true };
+        }
+        catch (error) {
+            return { success: false, error: String(error) };
+        }
+    }
+    async deleteProjectSpec(id, type = 'spec') {
+        try {
+            const dir = this.getProjectDirForType(type);
+            const filePath = path.join(dir, `${id}.md`);
+            if (!fs.existsSync(filePath)) {
+                return { success: false, error: `Project spec not found: ${id}` };
+            }
+            fs.unlinkSync(filePath);
+            return { success: true };
+        }
+        catch (error) {
+            return { success: false, error: String(error) };
+        }
+    }
+    // ==========================================================================
+    // Export / Import Operations
+    // ==========================================================================
+    async exportProjectTemplates(outputPath) {
+        try {
+            const templatesRoot = this.getProjectTemplatesRoot();
+            if (!fs.existsSync(templatesRoot)) {
+                return { success: false, error: 'No project templates found. Run /relay:setup first.' };
+            }
+            if (!fs.existsSync(outputPath)) {
+                fs.mkdirSync(outputPath, { recursive: true });
+            }
+            const configResult = await this.readDomainConfig();
+            const projectName = configResult.data?.project_name ?? 'unknown';
+            const copiedFiles = [];
+            this.copyDirRecursive(templatesRoot, outputPath, copiedFiles);
+            const meta = {
+                exported_at: new Date().toISOString(),
+                source_project: projectName,
+                scope: 'project',
+                files: copiedFiles
+            };
+            fs.writeFileSync(path.join(outputPath, 'relay-templates-export.json'), JSON.stringify(meta, null, 2), 'utf-8');
+            return { success: true, data: meta };
+        }
+        catch (error) {
+            return { success: false, error: String(error) };
+        }
+    }
+    async importProjectTemplates(sourcePath, conflictMode) {
+        try {
+            const metaPath = path.join(sourcePath, 'relay-templates-export.json');
+            if (!fs.existsSync(metaPath)) {
+                return { success: false, error: 'relay-templates-export.json not found in source path' };
+            }
+            const meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
+            const destRoot = this.getProjectTemplatesRoot();
+            if (!fs.existsSync(destRoot)) {
+                fs.mkdirSync(destRoot, { recursive: true });
+            }
+            let imported = 0;
+            let skipped = 0;
+            for (const relFile of meta.files) {
+                const srcFile = path.join(sourcePath, relFile);
+                let destFile = path.join(destRoot, relFile);
+                if (!fs.existsSync(srcFile)) {
+                    continue;
+                }
+                if (fs.existsSync(destFile)) {
+                    if (conflictMode === 'skip') {
+                        skipped++;
+                        continue;
+                    }
+                    else if (conflictMode === 'rename') {
+                        destFile = destFile.replace(/\.md$/, '.imported.md');
+                    }
+                    // 'overwrite' falls through
+                }
+                const destDir = path.dirname(destFile);
+                if (!fs.existsSync(destDir)) {
+                    fs.mkdirSync(destDir, { recursive: true });
+                }
+                // Ensure scope: project in frontmatter
+                let content = fs.readFileSync(srcFile, 'utf-8');
+                content = this.ensureProjectScope(content);
+                fs.writeFileSync(destFile, content, 'utf-8');
+                imported++;
+            }
+            return { success: true, data: { imported, skipped } };
         }
         catch (error) {
             return { success: false, error: String(error) };
@@ -1576,6 +1474,51 @@ class FileService {
         }
     }
     // ==========================================================================
+    // Legacy compatibility wrappers (deprecated, use SpecDefinition APIs)
+    // ==========================================================================
+    /** @deprecated Use TemplateService.listSpecs() instead */
+    async listCapabilities() {
+        return { success: true, data: [] };
+    }
+    /** @deprecated Use TemplateService.resolveSpec() instead */
+    async readCapability(_id) {
+        return { success: false, error: 'Use TemplateService.resolveSpec() instead' };
+    }
+    /** @deprecated Use writeProjectSpec() instead */
+    async upsertCapability(definition) {
+        try {
+            const specsDir = this.getProjectSpecsDir();
+            if (!fs.existsSync(specsDir)) {
+                fs.mkdirSync(specsDir, { recursive: true });
+            }
+            const existing = await this.listProjectSpecs();
+            const existingIds = new Set((existing.data || []).map(s => s.id));
+            const baseId = definition.id || (0, slugify_1.slugify)(definition.title);
+            const id = definition.id || (0, slugify_1.generateUniqueSlug)(baseId, existingIds);
+            const spec = {
+                id,
+                type: 'spec',
+                scope: 'project',
+                version: 1,
+                tags: [],
+                content: definition.content
+            };
+            await this.writeProjectSpec(id, spec);
+            return {
+                success: true,
+                data: {
+                    id,
+                    title: definition.title,
+                    content: definition.content,
+                    created_at: definition.created_at || new Date().toISOString().split('T')[0]
+                }
+            };
+        }
+        catch (error) {
+            return { success: false, error: String(error) };
+        }
+    }
+    // ==========================================================================
     // Helpers
     // ==========================================================================
     parseExpertMarkdown(content) {
@@ -1583,26 +1526,28 @@ class FileService {
         if (!frontmatterMatch) {
             throw new Error('No YAML frontmatter found');
         }
-        const frontmatter = yaml.parse(frontmatterMatch[1]);
+        const fm = yaml.parse(frontmatterMatch[1]);
         return {
-            role: frontmatter.role || '',
-            slug: frontmatter.slug || '',
-            domain: frontmatter.domain || 'general',
-            backed_by: frontmatter.backed_by || 'claude',
-            cli: frontmatter.cli,
-            model: frontmatter.model,
-            fallback_cli: frontmatter.fallback_cli,
-            tier: frontmatter.tier || 'standard',
-            permission_mode: frontmatter.permission_mode || 'default',
-            memory: frontmatter.memory,
-            isolation: frontmatter.isolation,
-            phases: frontmatter.phases || [],
-            agent_profile: frontmatter.agent_profile,
-            default_platform: frontmatter.default_platform,
+            role: fm.role || '',
+            slug: fm.slug || '',
+            domain: fm.domain || 'general',
+            backed_by: fm.backed_by || 'claude',
+            cli: fm.cli,
+            model: fm.model,
+            fallback_cli: fm.fallback_cli,
+            tier: fm.tier || 'standard',
+            permission_mode: fm.permission_mode || 'default',
+            memory: fm.memory,
+            isolation: fm.isolation,
+            phases: fm.phases || [],
+            agent_profile: fm.agent_profile,
+            default_platform: fm.default_platform,
             persona: '',
-            capabilities: [],
-            constraints: [],
-            created_at: frontmatter.created_at || new Date().toISOString().split('T')[0]
+            // Backward compat: read 'specs' first, fall back to 'capabilities'
+            specs: fm.specs ?? fm.capabilities ?? [],
+            capabilities: fm.capabilities ?? [],
+            constraints: fm.constraints || [],
+            created_at: fm.created_at || new Date().toISOString().split('T')[0]
         };
     }
     generateExpertMarkdown(expert) {
@@ -1621,8 +1566,16 @@ class FileService {
             phases: expert.phases,
             agent_profile: expert.agent_profile,
             default_platform: expert.default_platform,
+            specs: expert.specs ?? [],
+            constraints: expert.constraints,
             created_at: expert.created_at
         };
+        // Remove undefined fields
+        Object.keys(frontmatter).forEach(k => {
+            if (frontmatter[k] === undefined || frontmatter[k] === null) {
+                delete frontmatter[k];
+            }
+        });
         let content = `---\n${yaml.stringify(frontmatter)}---\n\n`;
         content += `# ${expert.role}\n\n`;
         if (expert.persona) {
@@ -1635,32 +1588,74 @@ class FileService {
             });
             content += '\n';
         }
-        if (expert.constraints && expert.constraints.length > 0) {
-            content += `## 제약\n\n`;
-            expert.constraints.forEach(con => {
-                content += `- ${con}\n`;
-            });
-            content += '\n';
-        }
         return content;
+    }
+    parseSpecMarkdown(content, defaultScope = 'user') {
+        const frontmatterMatch = content.match(/^---\n([\s\S]*?)\n---\n?/);
+        const fm = frontmatterMatch ? yaml.parse(frontmatterMatch[1]) : {};
+        const body = frontmatterMatch ? content.slice(frontmatterMatch[0].length).trim() : content.trim();
+        return {
+            id: fm.id || '',
+            type: fm.type || 'spec',
+            scope: fm.scope || defaultScope,
+            version: fm.version || 1,
+            tags: fm.tags || [],
+            requires: fm.requires,
+            conflicts_with: fm.conflicts_with,
+            content: body
+        };
+    }
+    generateSpecMarkdown(spec) {
+        const fm = {
+            id: spec.id,
+            type: spec.type,
+            scope: spec.scope,
+            version: spec.version,
+        };
+        if (spec.tags?.length) {
+            fm['tags'] = spec.tags;
+        }
+        if (spec.requires?.length) {
+            fm['requires'] = spec.requires;
+        }
+        if (spec.conflicts_with?.length) {
+            fm['conflicts_with'] = spec.conflicts_with;
+        }
+        return `---\n${yaml.stringify(fm)}---\n\n${spec.content.trim()}\n`;
+    }
+    ensureProjectScope(content) {
+        const frontmatterMatch = content.match(/^---\n([\s\S]*?)\n---/);
+        if (!frontmatterMatch) {
+            return content;
+        }
+        const fm = yaml.parse(frontmatterMatch[1]);
+        fm['scope'] = 'project';
+        return content.replace(frontmatterMatch[0], `---\n${yaml.stringify(fm)}---`);
+    }
+    copyDirRecursive(src, dest, collected) {
+        const entries = fs.readdirSync(src, { withFileTypes: true });
+        for (const entry of entries) {
+            const srcPath = path.join(src, entry.name);
+            const destPath = path.join(dest, entry.name);
+            if (entry.isDirectory()) {
+                if (!fs.existsSync(destPath)) {
+                    fs.mkdirSync(destPath, { recursive: true });
+                }
+                this.copyDirRecursive(srcPath, destPath, collected);
+            }
+            else if (entry.name.endsWith('.md')) {
+                fs.copyFileSync(srcPath, destPath);
+                // Store relative path from templates root
+                const relPath = path.relative(this.getProjectTemplatesRoot(), srcPath);
+                collected.push(relPath);
+            }
+        }
     }
 }
 exports.FileService = FileService;
 // Singleton export
 exports.fileService = new FileService();
 
-
-/***/ }),
-/* 4 */
-/***/ ((module) => {
-
-module.exports = require("path");
-
-/***/ }),
-/* 5 */
-/***/ ((module) => {
-
-module.exports = require("fs");
 
 /***/ }),
 /* 6 */
@@ -10149,6 +10144,587 @@ exports.stringify = stringify;
 
 
 /**
+ * slugify - Convert text to URL-friendly slug
+ *
+ * Converts role names, titles, or any text to lowercase,
+ * hyphen-separated slugs suitable for filenames and URLs.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.slugify = slugify;
+exports.generateUniqueSlug = generateUniqueSlug;
+exports.isValidSlug = isValidSlug;
+exports.sanitizeFilename = sanitizeFilename;
+/**
+ * Convert text to slug format
+ * - Convert to lowercase
+ * - Replace spaces and special characters with hyphens
+ * - Remove consecutive hyphens
+ * - Trim leading/trailing hyphens
+ *
+ * @param text - Input text to convert
+ * @param maxLength - Maximum length (default: 50)
+ * @returns URL-friendly slug
+ */
+function slugify(text, maxLength = 50) {
+    if (!text || text.trim() === '') {
+        return '';
+    }
+    return text
+        .toLowerCase()
+        // Replace Korean characters are kept as-is
+        .normalize('NFC')
+        // Replace spaces and special chars with hyphens
+        .replace(/[\s\u2000-\u200B\u3000_]+/g, '-')
+        // Remove characters that aren't alphanumeric, Korean, or hyphen
+        .replace(/[^\p{L}\p{N}-]+/gu, '')
+        // Replace multiple consecutive hyphens
+        .replace(/-+/g, '-')
+        // Trim hyphens from start/end
+        .replace(/^-+|-+$/g, '')
+        // Limit length
+        .slice(0, maxLength);
+}
+/**
+ * Generate a unique slug by appending a numeric suffix if needed
+ *
+ * @param baseSlug - Base slug to use
+ * @param existingSlugs - Set of already used slugs
+ * @returns Unique slug
+ */
+function generateUniqueSlug(baseSlug, existingSlugs) {
+    let slug = baseSlug;
+    let counter = 1;
+    while (existingSlugs.has(slug)) {
+        slug = `${baseSlug}-${counter}`;
+        counter++;
+    }
+    return slug;
+}
+/**
+ * Validate slug format
+ *
+ * @param slug - Slug to validate
+ * @returns True if valid
+ */
+function isValidSlug(slug) {
+    return /^[a-z0-9-]+$/.test(slug) && slug.length > 0 && slug.length <= 50;
+}
+/**
+ * Sanitize filename (more permissive than slugify)
+ *
+ * @param filename - Original filename
+ * @returns Safe filename
+ */
+function sanitizeFilename(filename) {
+    return filename
+        .replace(/[<>:"/\\|?*]/g, '') // Remove invalid characters
+        .replace(/^\.+/, '') // Remove leading dots
+        .slice(0, 255); // Limit length
+}
+
+
+/***/ }),
+/* 81 */
+/***/ (function(__unused_webpack_module, exports, __webpack_require__) {
+
+
+/**
+ * TemplateService - User scope + Project scope template resolution
+ *
+ * Resolution rule: project scope overrides user scope when both
+ * define a module with the same id.
+ *
+ * User scope  : relay-plugin/docs/templates/  (read-only, shipped with plugin)
+ * Project scope: {workspace}/.claude/relay/templates/  (per-project, mutable)
+ */
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.TemplateService = void 0;
+const path = __importStar(__webpack_require__(4));
+const fs = __importStar(__webpack_require__(3));
+const vscode = __importStar(__webpack_require__(1));
+class TemplateService {
+    pluginRoot;
+    fileService;
+    constructor(fileService) {
+        this.fileService = fileService;
+        this.pluginRoot = this.resolvePluginRoot();
+    }
+    // ==========================================================================
+    // Public API
+    // ==========================================================================
+    /**
+     * List all specs from user + project scope, merged.
+     * Project scope wins when id collides.
+     */
+    async listSpecs(filterType) {
+        const userSpecs = await this.loadUserScopeSpecs(filterType);
+        const projectSpecs = await this.loadProjectScopeSpecs(filterType);
+        const resolved = new Map();
+        // Load user scope first
+        for (const spec of userSpecs) {
+            resolved.set(spec.id, { id: spec.id, effective: spec });
+        }
+        // Project scope overrides user scope
+        for (const spec of projectSpecs) {
+            const existing = resolved.get(spec.id);
+            if (existing) {
+                resolved.set(spec.id, {
+                    id: spec.id,
+                    effective: spec,
+                    overridden_by: 'project',
+                    shadowed: existing.effective
+                });
+            }
+            else {
+                resolved.set(spec.id, { id: spec.id, effective: spec });
+            }
+        }
+        return Array.from(resolved.values()).sort((a, b) => a.id.localeCompare(b.id));
+    }
+    /** Resolve a single spec id. Project scope wins. */
+    async resolveSpec(id) {
+        const all = await this.listSpecs();
+        return all.find(s => s.id === id) ?? null;
+    }
+    /** List only project-scope specs */
+    async listProjectSpecs(filterType) {
+        const specs = await this.loadProjectScopeSpecs(filterType);
+        return specs;
+    }
+    /** Create or overwrite a project-scope spec */
+    async createProjectSpec(id, content, meta = {}) {
+        const spec = {
+            id,
+            type: meta.type ?? 'spec',
+            scope: 'project',
+            version: meta.version ?? 1,
+            tags: meta.tags ?? [],
+            requires: meta.requires,
+            conflicts_with: meta.conflicts_with,
+            content
+        };
+        await this.fileService.writeProjectSpec(id, spec);
+    }
+    /** Delete a project-scope spec (user scope specs are read-only) */
+    async deleteProjectSpec(id, type = 'spec') {
+        await this.fileService.deleteProjectSpec(id, type);
+    }
+    /**
+     * Copy a user-scope spec to project scope as a starting point for customization.
+     * Opens the file in VSCode editor after forking.
+     */
+    async forkToProject(id) {
+        const resolved = await this.resolveSpec(id);
+        if (!resolved) {
+            throw new Error(`Spec not found: ${id}`);
+        }
+        const userSpec = resolved.shadowed ?? resolved.effective;
+        const projectSpec = {
+            ...userSpec,
+            scope: 'project'
+        };
+        await this.fileService.writeProjectSpec(id, projectSpec);
+        // Open in editor — use type-aware directory
+        const dir = this.fileService.getProjectDirForType(projectSpec.type);
+        const filePath = path.join(dir, `${id}.md`);
+        const uri = vscode.Uri.file(filePath);
+        await vscode.window.showTextDocument(uri);
+    }
+    /** Check if a plugin-level user scope is available */
+    hasUserScope() {
+        if (!this.pluginRoot) {
+            return false;
+        }
+        const modulesRoot = this.getUserScopeModulesRoot();
+        if (!fs.existsSync(modulesRoot)) {
+            return false;
+        }
+        // at least one known subdirectory must exist
+        return ['specs', 'capabilities', 'platforms', 'policies', 'base'].some(sub => fs.existsSync(path.join(modulesRoot, sub)));
+    }
+    getPluginRoot() {
+        return this.pluginRoot;
+    }
+    // ==========================================================================
+    // Private: load specs
+    // ==========================================================================
+    async loadUserScopeSpecs(filterType) {
+        if (!this.hasUserScope()) {
+            return [];
+        }
+        const results = [];
+        const dirs = this.getUserScopeDirs(filterType);
+        for (const { dir, type } of dirs) {
+            if (!fs.existsSync(dir)) {
+                continue;
+            }
+            const files = fs.readdirSync(dir).filter(f => f.endsWith('.md'));
+            for (const file of files) {
+                try {
+                    const content = fs.readFileSync(path.join(dir, file), 'utf-8');
+                    const spec = this.fileService.parseSpecMarkdown(content, 'user');
+                    spec.id = path.parse(file).name;
+                    if (!filterType || spec.type === filterType) {
+                        results.push(spec);
+                    }
+                }
+                catch {
+                    // skip malformed files
+                }
+            }
+        }
+        return results;
+    }
+    async loadProjectScopeSpecs(filterType) {
+        const result = await this.fileService.listProjectSpecs();
+        const specs = result.data ?? [];
+        if (!filterType) {
+            return specs;
+        }
+        return specs.filter(s => s.type === filterType);
+    }
+    getUserScopeModulesRoot() {
+        return path.join(this.pluginRoot, 'docs', 'templates', 'modules');
+    }
+    /**
+     * spec 디렉토리명은 구버전 `capabilities/` 또는 신버전 `specs/` 모두 지원
+     */
+    resolveSpecsDir(modulesRoot) {
+        const specsDir = path.join(modulesRoot, 'specs');
+        if (fs.existsSync(specsDir)) {
+            return specsDir;
+        }
+        // backward compat: installed plugin may still use 'capabilities/'
+        return path.join(modulesRoot, 'capabilities');
+    }
+    getUserScopeDirs(filterType) {
+        const root = this.getUserScopeModulesRoot();
+        const all = [
+            { dir: this.resolveSpecsDir(root), type: 'spec' },
+            { dir: path.join(root, 'base'), type: 'base' },
+            { dir: path.join(root, 'platforms'), type: 'platform' },
+            { dir: path.join(root, 'policies'), type: 'policy' }
+        ];
+        if (!filterType) {
+            return all;
+        }
+        return all.filter(d => d.type === filterType);
+    }
+    // ==========================================================================
+    // Plugin root detection
+    // ==========================================================================
+    /** Re-detect plugin root (call after settings change) */
+    refresh() {
+        this.pluginRoot = this.resolvePluginRoot();
+    }
+    resolvePluginRoot() {
+        // 1. VSCode setting: agentManager.relayPluginPath
+        const settingPath = vscode.workspace.getConfiguration('agentManager').get('relayPluginPath');
+        if (settingPath && fs.existsSync(path.join(settingPath, 'docs', 'templates'))) {
+            return settingPath;
+        }
+        // 2. RELAY_PLUGIN_PATH env variable
+        const envPath = process.env['RELAY_PLUGIN_PATH'];
+        if (envPath && fs.existsSync(path.join(envPath, 'docs', 'templates'))) {
+            return envPath;
+        }
+        const homeDir = process.env['HOME'] ?? process.env['USERPROFILE'] ?? '';
+        // 3. Claude Code plugin cache: installed_plugins.json 파싱
+        const installedPluginsPath = path.join(homeDir, '.claude', 'plugins', 'installed_plugins.json');
+        if (fs.existsSync(installedPluginsPath)) {
+            try {
+                const json = JSON.parse(fs.readFileSync(installedPluginsPath, 'utf-8'));
+                const entries = json.plugins ?? {};
+                // relay@* 키를 찾아 가장 최신 installPath 사용
+                const relayEntry = Object.entries(entries).find(([key]) => key.startsWith('relay@'));
+                if (relayEntry) {
+                    // 설치 목록에서 마지막 항목 = 최신 버전
+                    const installs = relayEntry[1];
+                    const latest = installs[installs.length - 1]?.installPath;
+                    if (latest && fs.existsSync(path.join(latest, 'docs', 'templates'))) {
+                        return latest;
+                    }
+                }
+            }
+            catch {
+                // malformed JSON — continue to next candidate
+            }
+        }
+        // 4. workspace-relative candidates
+        const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        if (workspaceRoot) {
+            const workspaceCandidates = [
+                path.join(workspaceRoot, 'relay-plugin'),
+                path.join(workspaceRoot, '.claude-plugins', 'relay'),
+                path.join(path.dirname(workspaceRoot), 'relay-plugin')
+            ];
+            for (const candidate of workspaceCandidates) {
+                if (fs.existsSync(path.join(candidate, 'docs', 'templates'))) {
+                    return candidate;
+                }
+            }
+        }
+        // 5. Common global paths
+        const globalCandidates = [
+            path.join(homeDir, '.claude', 'plugins', 'relay'),
+            path.join(homeDir, '.claude', 'plugins', 'relay-plugin'),
+            path.join(homeDir, '.claude', 'plugins', 'cache', 'relay-plugin', 'relay')
+        ];
+        for (const candidate of globalCandidates) {
+            if (fs.existsSync(path.join(candidate, 'docs', 'templates'))) {
+                return candidate;
+            }
+        }
+        return undefined;
+    }
+}
+exports.TemplateService = TemplateService;
+
+
+/***/ }),
+/* 82 */
+/***/ (function(__unused_webpack_module, exports, __webpack_require__) {
+
+
+/**
+ * RelayEventWatcher - File system watcher for relay runtime events
+ *
+ * Watches .claude/relay/ subdirectories and dispatches events to VSCode UI:
+ *   - notify/events/*.json  → agent activity output panel
+ *   - experts/*.md          → tree view refresh
+ *   - teams/*.json          → tree view refresh
+ *   - templates/**          → template browser refresh
+ */
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.RelayEventWatcher = void 0;
+const vscode = __importStar(__webpack_require__(1));
+const fs = __importStar(__webpack_require__(3));
+class RelayEventWatcher {
+    watchers = [];
+    outputChannel;
+    onRefreshTree;
+    onRefreshTemplates;
+    statusBarItem;
+    activeAgentCount = 0;
+    constructor() {
+        this.outputChannel = vscode.window.createOutputChannel('Agent Activity');
+        this.statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
+        this.statusBarItem.command = 'agentManager.showAgentActivity';
+        this.statusBarItem.hide();
+    }
+    // ==========================================================================
+    // Lifecycle
+    // ==========================================================================
+    start(relayRoot, options = {}) {
+        this.onRefreshTree = options.onRefreshTree;
+        this.onRefreshTemplates = options.onRefreshTemplates;
+        this.watchNotifyEvents(relayRoot);
+        this.watchExperts(relayRoot);
+        this.watchTeams(relayRoot);
+        this.watchTemplates(relayRoot);
+    }
+    showOutputChannel() {
+        this.outputChannel.show(true);
+    }
+    dispose() {
+        this.watchers.forEach(w => w.dispose());
+        this.watchers = [];
+        this.outputChannel.dispose();
+        this.statusBarItem.dispose();
+    }
+    // ==========================================================================
+    // Watchers
+    // ==========================================================================
+    watchNotifyEvents(relayRoot) {
+        const pattern = new vscode.RelativePattern(vscode.Uri.file(relayRoot), 'notify/events/*.json');
+        const watcher = vscode.workspace.createFileSystemWatcher(pattern, false, true, true);
+        watcher.onDidCreate(uri => {
+            this.handleEventFile(uri.fsPath);
+        });
+        this.watchers.push(watcher);
+    }
+    watchExperts(relayRoot) {
+        const pattern = new vscode.RelativePattern(vscode.Uri.file(relayRoot), 'experts/*.md');
+        const watcher = vscode.workspace.createFileSystemWatcher(pattern);
+        const refresh = () => this.onRefreshTree?.();
+        watcher.onDidCreate(refresh);
+        watcher.onDidChange(refresh);
+        watcher.onDidDelete(refresh);
+        this.watchers.push(watcher);
+    }
+    watchTeams(relayRoot) {
+        const pattern = new vscode.RelativePattern(vscode.Uri.file(relayRoot), 'teams/*.json');
+        const watcher = vscode.workspace.createFileSystemWatcher(pattern);
+        const refresh = () => this.onRefreshTree?.();
+        watcher.onDidCreate(refresh);
+        watcher.onDidChange(refresh);
+        watcher.onDidDelete(refresh);
+        this.watchers.push(watcher);
+    }
+    watchTemplates(relayRoot) {
+        const pattern = new vscode.RelativePattern(vscode.Uri.file(relayRoot), 'templates/**/*.md');
+        const watcher = vscode.workspace.createFileSystemWatcher(pattern);
+        const refresh = () => {
+            this.onRefreshTemplates?.();
+            this.onRefreshTree?.();
+        };
+        watcher.onDidCreate(refresh);
+        watcher.onDidChange(refresh);
+        watcher.onDidDelete(refresh);
+        this.watchers.push(watcher);
+    }
+    // ==========================================================================
+    // Event Handling
+    // ==========================================================================
+    handleEventFile(filePath) {
+        try {
+            if (!fs.existsSync(filePath)) {
+                return;
+            }
+            const raw = fs.readFileSync(filePath, 'utf-8');
+            const event = JSON.parse(raw);
+            this.dispatchEvent(event);
+        }
+        catch {
+            // ignore malformed event files
+        }
+    }
+    dispatchEvent(event) {
+        switch (event.event_type) {
+            case 'file_changed':
+                this.onFileChanged(event);
+                break;
+            case 'stop':
+                this.onAgentStop(event);
+                break;
+            case 'teammate_idle':
+                this.onTeammateIdle(event);
+                break;
+            default:
+                this.logEvent(event);
+                break;
+        }
+    }
+    onFileChanged(event) {
+        const filePath = event.payload['file_path'] ?? '';
+        const toolName = event.payload['tool_name'] ?? '';
+        const shortPath = filePath.split('/').slice(-3).join('/');
+        this.logToOutput(`[file] ${toolName}: ${shortPath}`, event.timestamp);
+        this.onRefreshTree?.();
+    }
+    onAgentStop(event) {
+        this.activeAgentCount = Math.max(0, this.activeAgentCount - 1);
+        this.updateStatusBar();
+        this.logToOutput('[stop] Agent session ended', event.timestamp);
+        if (this.activeAgentCount === 0) {
+            vscode.window.showInformationMessage('Agent task completed.');
+            setTimeout(() => this.statusBarItem.hide(), 3000);
+        }
+    }
+    onTeammateIdle(event) {
+        const agentSlug = event.payload['agent'] ?? 'unknown';
+        this.logToOutput(`[idle] ${agentSlug} is idle`, event.timestamp);
+        this.bumpActiveAgentCount();
+    }
+    bumpActiveAgentCount() {
+        this.activeAgentCount++;
+        this.updateStatusBar();
+    }
+    updateStatusBar() {
+        if (this.activeAgentCount > 0) {
+            this.statusBarItem.text = `$(loading~spin) ${this.activeAgentCount} agent(s) active`;
+            this.statusBarItem.tooltip = 'Click to show agent activity';
+            this.statusBarItem.show();
+        }
+        else {
+            this.statusBarItem.hide();
+        }
+    }
+    logToOutput(message, timestamp) {
+        const ts = timestamp
+            ? new Date(timestamp).toLocaleTimeString()
+            : new Date().toLocaleTimeString();
+        this.outputChannel.appendLine(`[${ts}] ${message}`);
+    }
+    logEvent(event) {
+        this.logToOutput(`[${event.event_type}] ${JSON.stringify(event.payload)}`, event.timestamp);
+    }
+}
+exports.RelayEventWatcher = RelayEventWatcher;
+
+
+/***/ }),
+/* 83 */
+/***/ ((__unused_webpack_module, exports) => {
+
+
+/**
  * VisualizationService - Diagram generation for agent hierarchy
  *
  * Generates Mermaid diagrams for:
@@ -10413,7 +10989,7 @@ exports.visualizationService = new VisualizationService();
 
 
 /***/ }),
-/* 81 */
+/* 84 */
 /***/ (function(__unused_webpack_module, exports, __webpack_require__) {
 
 
@@ -10462,10 +11038,10 @@ var __importStar = (this && this.__importStar) || (function () {
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.TeamBuilderPanel = void 0;
 const vscode = __importStar(__webpack_require__(1));
-const TeamService_1 = __webpack_require__(82);
-const ExpertService_1 = __webpack_require__(85);
-const ValidationService_1 = __webpack_require__(83);
-const webview_1 = __webpack_require__(86);
+const TeamService_1 = __webpack_require__(85);
+const ExpertService_1 = __webpack_require__(87);
+const ValidationService_1 = __webpack_require__(86);
+const webview_1 = __webpack_require__(88);
 class TeamBuilderPanel {
     extensionUri;
     static currentPanel;
@@ -10942,6 +11518,15 @@ class TeamBuilderPanel {
         renderExpertList(filtered);
       }
 
+      function closeExpertPicker() {
+        expertSearch.value = '';
+        renderExpertList(availableExperts);
+
+        if (document.activeElement instanceof HTMLElement) {
+          document.activeElement.blur();
+        }
+      }
+
       function renderMemberList() {
         memberList.innerHTML = '';
         memberCount.textContent = \`(\${teamMembers.length})\`;
@@ -11041,6 +11626,7 @@ class TeamBuilderPanel {
 
         if (teamMembers.some(m => m.expert_slug === slug)) {
           showStatus('Expert already in team', 'warning');
+          closeExpertPicker();
           return;
         }
 
@@ -11055,11 +11641,13 @@ class TeamBuilderPanel {
         });
 
         renderMemberList();
+        closeExpertPicker();
         showStatus(\`Added \${expert.role} to team\`, 'info');
       }
 
       function showExpertDetails(slug) {
         selectedExpertSlug = slug;
+        closeExpertPicker();
         vscode.postMessage({ type: 'loadExpert', data: slug });
       }
 
@@ -11242,7 +11830,7 @@ exports.TeamBuilderPanel = TeamBuilderPanel;
 
 
 /***/ }),
-/* 82 */
+/* 85 */
 /***/ (function(__unused_webpack_module, exports, __webpack_require__) {
 
 
@@ -11291,9 +11879,9 @@ var __importStar = (this && this.__importStar) || (function () {
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.teamService = exports.TeamService = void 0;
 const vscode = __importStar(__webpack_require__(1));
-const FileService_1 = __webpack_require__(3);
-const ValidationService_1 = __webpack_require__(83);
-const slugify_1 = __webpack_require__(84);
+const FileService_1 = __webpack_require__(5);
+const ValidationService_1 = __webpack_require__(86);
+const slugify_1 = __webpack_require__(80);
 class TeamService {
     // ==========================================================================
     // CRUD Operations
@@ -11719,7 +12307,7 @@ exports.teamService = new TeamService();
 
 
 /***/ }),
-/* 83 */
+/* 86 */
 /***/ (function(__unused_webpack_module, exports, __webpack_require__) {
 
 
@@ -11763,7 +12351,7 @@ var __importStar = (this && this.__importStar) || (function () {
 })();
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.validationService = exports.ValidationService = void 0;
-const FileService_1 = __webpack_require__(3);
+const FileService_1 = __webpack_require__(5);
 class ValidationService {
     VALID_DOMAINS = ['general', 'development'];
     VALID_TIERS = ['trivial', 'standard', 'premium'];
@@ -11971,92 +12559,7 @@ exports.validationService = new ValidationService();
 
 
 /***/ }),
-/* 84 */
-/***/ ((__unused_webpack_module, exports) => {
-
-
-/**
- * slugify - Convert text to URL-friendly slug
- *
- * Converts role names, titles, or any text to lowercase,
- * hyphen-separated slugs suitable for filenames and URLs.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.slugify = slugify;
-exports.generateUniqueSlug = generateUniqueSlug;
-exports.isValidSlug = isValidSlug;
-exports.sanitizeFilename = sanitizeFilename;
-/**
- * Convert text to slug format
- * - Convert to lowercase
- * - Replace spaces and special characters with hyphens
- * - Remove consecutive hyphens
- * - Trim leading/trailing hyphens
- *
- * @param text - Input text to convert
- * @param maxLength - Maximum length (default: 50)
- * @returns URL-friendly slug
- */
-function slugify(text, maxLength = 50) {
-    if (!text || text.trim() === '') {
-        return '';
-    }
-    return text
-        .toLowerCase()
-        // Replace Korean characters are kept as-is
-        .normalize('NFC')
-        // Replace spaces and special chars with hyphens
-        .replace(/[\s\u2000-\u200B\u3000_]+/g, '-')
-        // Remove characters that aren't alphanumeric, Korean, or hyphen
-        .replace(/[^\p{L}\p{N}-]+/gu, '')
-        // Replace multiple consecutive hyphens
-        .replace(/-+/g, '-')
-        // Trim hyphens from start/end
-        .replace(/^-+|-+$/g, '')
-        // Limit length
-        .slice(0, maxLength);
-}
-/**
- * Generate a unique slug by appending a numeric suffix if needed
- *
- * @param baseSlug - Base slug to use
- * @param existingSlugs - Set of already used slugs
- * @returns Unique slug
- */
-function generateUniqueSlug(baseSlug, existingSlugs) {
-    let slug = baseSlug;
-    let counter = 1;
-    while (existingSlugs.has(slug)) {
-        slug = `${baseSlug}-${counter}`;
-        counter++;
-    }
-    return slug;
-}
-/**
- * Validate slug format
- *
- * @param slug - Slug to validate
- * @returns True if valid
- */
-function isValidSlug(slug) {
-    return /^[a-z0-9-]+$/.test(slug) && slug.length > 0 && slug.length <= 50;
-}
-/**
- * Sanitize filename (more permissive than slugify)
- *
- * @param filename - Original filename
- * @returns Safe filename
- */
-function sanitizeFilename(filename) {
-    return filename
-        .replace(/[<>:"/\\|?*]/g, '') // Remove invalid characters
-        .replace(/^\.+/, '') // Remove leading dots
-        .slice(0, 255); // Limit length
-}
-
-
-/***/ }),
-/* 85 */
+/* 87 */
 /***/ ((__unused_webpack_module, exports, __webpack_require__) => {
 
 
@@ -12071,9 +12574,9 @@ function sanitizeFilename(filename) {
  */
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.expertService = exports.ExpertService = void 0;
-const FileService_1 = __webpack_require__(3);
-const ValidationService_1 = __webpack_require__(83);
-const slugify_1 = __webpack_require__(84);
+const FileService_1 = __webpack_require__(5);
+const ValidationService_1 = __webpack_require__(86);
+const slugify_1 = __webpack_require__(80);
 class ExpertService {
     templates = new Map();
     constructor() {
@@ -12493,7 +12996,7 @@ exports.expertService = new ExpertService();
 
 
 /***/ }),
-/* 86 */
+/* 88 */
 /***/ (function(__unused_webpack_module, exports, __webpack_require__) {
 
 
@@ -12577,7 +13080,7 @@ const vscode = __importStar(__webpack_require__(1));
 
 
 /***/ }),
-/* 87 */
+/* 89 */
 /***/ (function(__unused_webpack_module, exports, __webpack_require__) {
 
 
@@ -12621,13 +13124,55 @@ var __importStar = (this && this.__importStar) || (function () {
 })();
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.openExpertManager = openExpertManager;
+exports.dispatchExpertManagerMessage = dispatchExpertManagerMessage;
+exports.getExpertManagerHtmlForTest = getExpertManagerHtmlForTest;
 const vscode = __importStar(__webpack_require__(1));
-const ExpertManagerService_1 = __webpack_require__(88);
-const webview_1 = __webpack_require__(86);
+const ExpertManagerService_1 = __webpack_require__(90);
+const webview_1 = __webpack_require__(88);
 let currentPanel;
-function openExpertManager(extensionUri, expertSlug) {
+let currentExpertSlug;
+let _templateService;
+const debugChannel = vscode.window.createOutputChannel('Agent Manager: ExpertManager');
+function logDebug(message, data) {
+    const timestamp = new Date().toISOString();
+    const suffix = data === undefined ? '' : ` ${safeStringify(data)}`;
+    const line = `[${timestamp}] ${message}${suffix}`;
+    debugChannel.appendLine(line);
+    console.log(`[ExpertManager] ${message}`, data ?? '');
+}
+function safeStringify(value) {
+    try {
+        return JSON.stringify(value);
+    }
+    catch {
+        return '[unserializable]';
+    }
+}
+function postToWebview(panel, message) {
+    logDebug('Posting message to webview', message);
+    panel.webview.postMessage(message);
+}
+const defaultMessageHandlers = {
+    init: handleInit,
+    save: handleSave,
+    delete: handleDelete,
+    duplicate: handleDuplicate,
+    loadTemplate: handleLoadTemplate,
+    generateSlug: handleGenerateSlug,
+    validateSlug: handleValidateSlug,
+    cancel: handleCancel,
+    saveSpec: handleSaveSpec,
+    deleteSpec: handleDeleteSpec
+};
+function openExpertManager(extensionUri, expertSlug, templateService) {
+    currentExpertSlug = expertSlug;
+    _templateService = templateService;
+    logDebug('openExpertManager invoked', { expertSlug, hasCurrentPanel: !!currentPanel });
     if (currentPanel) {
+        logDebug('Revealing existing ExpertManager panel', { expertSlug });
+        currentPanel.title = expertSlug ? 'Edit Expert' : 'Create Expert';
         currentPanel.reveal();
+        void dispatchExpertManagerMessage(currentPanel, { command: 'init' }, currentExpertSlug);
         return;
     }
     currentPanel = vscode.window.createWebviewPanel('expertManager', expertSlug ? 'Edit Expert' : 'Create Expert', vscode.ViewColumn.Beside, {
@@ -12638,6 +13183,7 @@ function openExpertManager(extensionUri, expertSlug) {
     currentPanel.webview.html = getHtml(currentPanel.webview, extensionUri);
     currentPanel.onDidDispose(() => {
         currentPanel = undefined;
+        currentExpertSlug = undefined;
     });
     // Handle messages from webview
     currentPanel.webview.onDidReceiveMessage(async (message) => {
@@ -12645,63 +13191,56 @@ function openExpertManager(extensionUri, expertSlug) {
         if (!panel) {
             return;
         }
-        switch (message.command) {
-            case 'init':
-                await handleInit(panel, expertSlug);
-                break;
-            case 'save':
-                await handleSave(panel, message.data);
-                break;
-            case 'delete':
-                await handleDelete(panel, message.slug);
-                break;
-            case 'duplicate':
-                await handleDuplicate(panel, message.slug);
-                break;
-            case 'loadTemplate':
-                await handleLoadTemplate(panel, message.templateId);
-                break;
-            case 'generateSlug':
-                handleGenerateSlug(panel, message.role);
-                break;
-            case 'validateSlug':
-                await handleValidateSlug(panel, message.slug, message.originalSlug);
-                break;
-        }
+        await dispatchExpertManagerMessage(panel, message, currentExpertSlug);
     }, undefined);
 }
 // ==========================================================================
 // Message Handlers
 // ==========================================================================
 async function handleInit(panel, expertSlug) {
+    logDebug('handleInit start', { expertSlug });
+    const { fileService } = await Promise.resolve().then(() => __importStar(__webpack_require__(5)));
+    // Load specs: user scope + project scope merged via TemplateService if available,
+    // otherwise fall back to project-scope only.
+    let allSpecs = [];
+    if (_templateService) {
+        const resolved = await _templateService.listSpecs('spec');
+        allSpecs = resolved.map(r => ({
+            ...r.effective,
+            // carry scope badge so webview can show [U]/[P]
+            _overridden: r.overridden_by === 'project'
+        }));
+    }
+    else {
+        const specsResult = await fileService.listProjectSpecs();
+        allSpecs = (specsResult.data || []).filter(s => s.type === 'spec');
+    }
     if (expertSlug) {
-        // Load existing expert
-        const { fileService } = await Promise.resolve().then(() => __importStar(__webpack_require__(3)));
         const result = await fileService.readExpert(expertSlug);
         if (result.success && result.data) {
-            panel.webview.postMessage({
-                command: 'loadExpert',
-                data: result.data
-            });
+            postToWebview(panel, { command: 'loadExpert', data: result.data, specs: allSpecs });
         }
         else {
-            panel.webview.postMessage({
-                command: 'error',
-                message: `Expert not found: ${expertSlug}`
-            });
+            postToWebview(panel, { command: 'error', message: `Expert not found: ${expertSlug}` });
         }
     }
     else {
-        // New expert - send templates
-        panel.webview.postMessage({
+        postToWebview(panel, {
             command: 'loadTemplates',
             templates: ExpertManagerService_1.expertManagerService.getTemplates(),
             categories: ExpertManagerService_1.expertManagerService.getCategories(),
-            formData: ExpertManagerService_1.expertManagerService.getFormData()
+            formData: ExpertManagerService_1.expertManagerService.getFormData(),
+            specs: allSpecs
         });
     }
 }
 async function handleSave(panel, data) {
+    logDebug('handleSave start', {
+        slug: data.slug,
+        originalSlug: data._originalSlug,
+        role: data.role,
+        phases: data.phases?.length ?? 0
+    });
     const isEdit = !!data._originalSlug;
     // Prepare expert object
     const expert = {
@@ -12720,6 +13259,7 @@ async function handleSave(panel, data) {
         agent_profile: data.agent_profile,
         default_platform: data.default_platform,
         persona: data.persona || '',
+        specs: data.specs || [],
         capabilities: data.capabilities || [],
         constraints: data.constraints || [],
         created_at: data.created_at || new Date().toISOString().split('T')[0]
@@ -12732,22 +13272,25 @@ async function handleSave(panel, data) {
         result = await ExpertManagerService_1.expertManagerService.createExpert(expert);
     }
     if (result.success) {
-        panel.webview.postMessage({
+        postToWebview(panel, {
             command: 'saved',
             data: result.data
         });
+        currentExpertSlug = result.data?.slug;
+        panel.title = currentExpertSlug ? 'Edit Expert' : 'Create Expert';
         vscode.window.showInformationMessage(`Expert ${isEdit ? 'updated' : 'created'} successfully!`);
         // Refresh tree
         vscode.commands.executeCommand('agentManager.refreshTree');
     }
     else {
-        panel.webview.postMessage({
+        postToWebview(panel, {
             command: 'error',
             message: result.error || 'Failed to save expert'
         });
     }
 }
 async function handleDelete(panel, slug) {
+    logDebug('handleDelete start', { slug });
     const confirmed = await vscode.window.showWarningMessage(`Delete expert "${slug}"? This action cannot be undone.`, { modal: true }, 'Delete', 'Cancel');
     if (confirmed === 'Delete') {
         const result = await ExpertManagerService_1.expertManagerService.deleteExpert(slug);
@@ -12762,6 +13305,7 @@ async function handleDelete(panel, slug) {
     }
 }
 async function handleDuplicate(panel, slug) {
+    logDebug('handleDuplicate start', { slug });
     const newSlug = await vscode.window.showInputBox({
         prompt: 'Enter slug for the duplicate',
         value: `${slug}-copy`,
@@ -12784,27 +13328,72 @@ async function handleDuplicate(panel, slug) {
         vscode.window.showErrorMessage(result.error || 'Failed to duplicate expert');
     }
 }
+function handleCancel(panel) {
+    logDebug('handleCancel start');
+    panel.dispose();
+}
+async function handleSaveSpec(panel, spec) {
+    logDebug('handleSaveSpec start', { id: spec.id, type: spec.type });
+    const { fileService } = await Promise.resolve().then(() => __importStar(__webpack_require__(5)));
+    const result = await fileService.writeProjectSpec(spec.id, {
+        ...spec,
+        type: 'spec',
+        scope: 'project'
+    });
+    if (result.success) {
+        postToWebview(panel, {
+            command: 'specSaved',
+            spec: { ...spec, type: 'spec', scope: 'project' }
+        });
+    }
+    else {
+        postToWebview(panel, {
+            command: 'error',
+            message: result.error || 'Failed to save spec'
+        });
+    }
+}
+async function handleDeleteSpec(panel, id) {
+    logDebug('handleDeleteSpec start', { id });
+    const { fileService } = await Promise.resolve().then(() => __importStar(__webpack_require__(5)));
+    const result = await fileService.deleteProjectSpec(id, 'spec');
+    if (result.success) {
+        postToWebview(panel, {
+            command: 'specDeleted',
+            id
+        });
+    }
+    else {
+        postToWebview(panel, {
+            command: 'error',
+            message: result.error || 'Failed to delete spec'
+        });
+    }
+}
 async function handleLoadTemplate(panel, templateId) {
+    logDebug('handleLoadTemplate start', { templateId });
     const template = ExpertManagerService_1.expertManagerService.getTemplate(templateId);
     if (template) {
-        panel.webview.postMessage({
+        postToWebview(panel, {
             command: 'loadTemplate',
             template
         });
     }
 }
 function handleGenerateSlug(panel, role) {
+    logDebug('handleGenerateSlug start', { role });
     const slug = ExpertManagerService_1.expertManagerService.generateSlug(role);
-    panel.webview.postMessage({
+    postToWebview(panel, {
         command: 'slugGenerated',
         slug
     });
 }
 async function handleValidateSlug(panel, slug, originalSlug) {
+    logDebug('handleValidateSlug start', { slug, originalSlug });
     // Basic format validation
     const formatValidation = ExpertManagerService_1.expertManagerService.validateSlug(slug);
     if (!formatValidation.valid) {
-        panel.webview.postMessage({
+        postToWebview(panel, {
             command: 'slugValidation',
             valid: false,
             error: formatValidation.error
@@ -12813,19 +13402,60 @@ async function handleValidateSlug(panel, slug, originalSlug) {
     }
     // Check uniqueness if creating new or slug changed
     if (!originalSlug || slug !== originalSlug) {
-        const { validationService } = await Promise.resolve().then(() => __importStar(__webpack_require__(83)));
+        const { validationService } = await Promise.resolve().then(() => __importStar(__webpack_require__(86)));
         const isUnique = await validationService.checkExpertSlugUnique(slug);
-        panel.webview.postMessage({
+        postToWebview(panel, {
             command: 'slugValidation',
             valid: isUnique,
             error: isUnique ? undefined : 'Slug already exists'
         });
     }
     else {
-        panel.webview.postMessage({
+        postToWebview(panel, {
             command: 'slugValidation',
             valid: true
         });
+    }
+}
+async function dispatchExpertManagerMessage(panel, message, expertSlug, handlers = defaultMessageHandlers) {
+    logDebug('Received message from webview', message);
+    switch (message.command) {
+        case 'init':
+            await handlers.init(panel, expertSlug);
+            break;
+        case 'save':
+            await handlers.save(panel, message.data);
+            break;
+        case 'delete':
+            await handlers.delete(panel, String(message.slug || ''));
+            break;
+        case 'duplicate':
+            await handlers.duplicate(panel, String(message.slug || ''));
+            break;
+        case 'loadTemplate':
+            await handlers.loadTemplate(panel, String(message.templateId || ''));
+            break;
+        case 'generateSlug':
+            handlers.generateSlug(panel, String(message.role || ''));
+            break;
+        case 'validateSlug':
+            await handlers.validateSlug(panel, String(message.slug || ''), message.originalSlug ? String(message.originalSlug) : undefined);
+            break;
+        case 'cancel':
+            handlers.cancel(panel);
+            break;
+        case 'saveSpec':
+            await handlers.saveSpec(panel, message.spec);
+            break;
+        case 'deleteSpec':
+            await handlers.deleteSpec(panel, String(message.id || ''));
+            break;
+        case 'debug':
+            logDebug(`Webview debug: ${String(message.message || '')}`, message.data);
+            break;
+        default:
+            logDebug('Unhandled webview message command', message);
+            break;
     }
 }
 // ==========================================================================
@@ -12887,6 +13517,7 @@ function getHtml(_webview, _extensionUri) {
       margin-bottom: var(--spacing-lg);
       padding-bottom: var(--spacing-md);
       border-bottom: 1px solid var(--border-color);
+      gap: var(--spacing-md);
     }
 
     .header h1 {
@@ -12894,9 +13525,22 @@ function getHtml(_webview, _extensionUri) {
       font-weight: 600;
     }
 
+    .header-copy {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .header-copy p {
+      color: var(--text-secondary);
+      font-size: 12px;
+    }
+
     .header-actions {
       display: flex;
       gap: var(--spacing-sm);
+      flex-wrap: wrap;
+      justify-content: flex-end;
     }
 
     .template-section {
@@ -12947,6 +13591,10 @@ function getHtml(_webview, _extensionUri) {
 
     .form-section {
       margin-bottom: var(--spacing-lg);
+      background: var(--bg-secondary);
+      border: 1px solid var(--border-color);
+      border-radius: 10px;
+      padding: var(--spacing-lg);
     }
 
     .form-section h2 {
@@ -12965,6 +13613,70 @@ function getHtml(_webview, _extensionUri) {
 
     .form-row.single {
       grid-template-columns: 1fr;
+    }
+
+    .page-layout {
+      display: grid;
+      grid-template-columns: minmax(0, 1.7fr) minmax(280px, 0.9fr);
+      gap: var(--spacing-lg);
+      align-items: start;
+    }
+
+    .main-column,
+    .side-column {
+      min-width: 0;
+    }
+
+    .side-column {
+      display: flex;
+      flex-direction: column;
+      gap: var(--spacing-lg);
+      position: sticky;
+      top: var(--spacing-lg);
+    }
+
+    .side-card {
+      background: var(--bg-secondary);
+      border: 1px solid var(--border-color);
+      border-radius: 10px;
+      padding: var(--spacing-lg);
+    }
+
+    .side-card h2 {
+      font-size: 14px;
+      font-weight: 600;
+      margin-bottom: var(--spacing-md);
+      color: var(--text-secondary);
+    }
+
+    .summary-list {
+      display: grid;
+      gap: var(--spacing-sm);
+    }
+
+    .summary-item {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      padding: var(--spacing-sm);
+      border-radius: var(--radius);
+      background: var(--bg-primary);
+      border: 1px solid var(--border-color);
+    }
+
+    .summary-item strong {
+      font-size: 12px;
+      color: var(--text-secondary);
+      font-weight: 500;
+    }
+
+    .summary-item span {
+      font-size: 13px;
+    }
+
+    .phase-grid {
+      display: grid;
+      gap: var(--spacing-sm);
     }
 
     .form-group {
@@ -13084,11 +13796,92 @@ function getHtml(_webview, _extensionUri) {
       padding: var(--spacing-sm);
     }
 
+    .capability-browser {
+      display: grid;
+      grid-template-columns: minmax(0, 1.1fr) minmax(240px, 0.9fr);
+      gap: var(--spacing-md);
+      margin-bottom: var(--spacing-md);
+    }
+
+    .capability-picker {
+      display: flex;
+      flex-direction: column;
+      gap: var(--spacing-sm);
+    }
+
+    .preset-select {
+      width: 100%;
+      min-height: 180px;
+      background: var(--bg-primary);
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius);
+      color: var(--text-primary);
+      padding: var(--spacing-sm);
+      font-family: inherit;
+      font-size: 13px;
+    }
+
+    .preset-select option {
+      padding: 6px 8px;
+    }
+
+    .preset-actions {
+      display: flex;
+      gap: var(--spacing-sm);
+      align-items: center;
+    }
+
+    .preset-meta {
+      font-size: 12px;
+      color: var(--text-secondary);
+    }
+
+    .capability-detail {
+      border: 1px solid var(--border-color);
+      border-radius: 10px;
+      background: var(--bg-primary);
+      padding: var(--spacing-md);
+      min-height: 180px;
+      display: flex;
+      flex-direction: column;
+      gap: var(--spacing-sm);
+    }
+
+    .capability-detail h3 {
+      font-size: 13px;
+      font-weight: 600;
+    }
+
+    .capability-detail p {
+      font-size: 13px;
+      color: var(--text-secondary);
+      white-space: pre-wrap;
+      line-height: 1.6;
+    }
+
+    .capability-detail .empty {
+      color: var(--text-placeholder);
+    }
+
+    .list-item.selected {
+      border-color: var(--accent-color);
+      box-shadow: inset 0 0 0 1px var(--accent-color);
+    }
+
     .list-item {
       display: flex;
       gap: var(--spacing-sm);
       margin-bottom: var(--spacing-sm);
       align-items: center;
+      background: var(--bg-primary);
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius);
+      padding: 8px 10px;
+      transition: all 0.15s ease;
+    }
+
+    .list-item:hover {
+      border-color: var(--accent-color);
     }
 
     .list-item input {
@@ -13096,39 +13889,60 @@ function getHtml(_webview, _extensionUri) {
       background: var(--bg-input);
       border: 1px solid var(--input-border);
       border-radius: var(--radius);
-      padding: 4px 8px;
+      padding: 8px 10px;
       color: var(--text-primary);
-      font-size: 12px;
+      font-size: 13px;
+    }
+
+    .list-item input:focus {
+      outline: none;
+      border-color: var(--accent-color);
     }
 
     .btn-small {
-      background: none;
-      border: none;
+      background: var(--bg-secondary);
+      border: 1px solid var(--border-color);
       color: var(--text-secondary);
       cursor: pointer;
-      padding: 4px;
+      padding: 4px 8px;
       border-radius: 4px;
+      font-size: 11px;
+      transition: all 0.15s ease;
     }
 
     .btn-small:hover {
-      background: var(--border-color);
-      color: var(--error-color);
+      background: var(--error-color);
+      border-color: var(--error-color);
+      color: white;
     }
 
     .btn-add {
-      background: none;
+      background: var(--bg-secondary);
       border: 1px dashed var(--border-color);
-      color: var(--text-secondary);
+      color: var(--text-primary);
       cursor: pointer;
-      padding: 6px 12px;
+      padding: 10px 14px;
       border-radius: var(--radius);
-      font-size: 12px;
+      font-size: 13px;
+      font-weight: 500;
       width: 100%;
+      margin-top: var(--spacing-sm);
+      transition: all 0.2s ease;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
     }
 
     .btn-add:hover {
       border-color: var(--accent-color);
-      color: var(--accent-color);
+      background: var(--accent-color);
+      color: var(--bg-primary);
+      border-style: solid;
+    }
+
+    .btn-add:active {
+      transform: scale(0.98);
     }
 
     .actions {
@@ -13138,6 +13952,10 @@ function getHtml(_webview, _extensionUri) {
       margin-top: var(--spacing-lg);
       padding-top: var(--spacing-lg);
       border-top: 1px solid var(--border-color);
+      position: sticky;
+      bottom: 0;
+      background: linear-gradient(180deg, rgba(0, 0, 0, 0) 0%, var(--bg-primary) 35%);
+      padding-bottom: var(--spacing-sm);
     }
 
     .btn {
@@ -13291,6 +14109,38 @@ function getHtml(_webview, _extensionUri) {
     .badge-development { background: #2ca02c; color: white; }
     .badge-general { background: #1f77b4; color: white; }
     .badge-custom { background: #95a5a6; color: white; }
+
+    @media (max-width: 980px) {
+      body {
+        padding: var(--spacing-md);
+      }
+
+      .header {
+        flex-direction: column;
+        align-items: flex-start;
+      }
+
+      .header-actions {
+        width: 100%;
+        justify-content: flex-start;
+      }
+
+      .page-layout {
+        grid-template-columns: 1fr;
+      }
+
+      .side-column {
+        position: static;
+      }
+
+      .form-row {
+        grid-template-columns: 1fr;
+      }
+
+      .capability-browser {
+        grid-template-columns: 1fr;
+      }
+    }
   </style>
 </head>
 <body>
@@ -13307,25 +14157,59 @@ function getHtml(_webview, _extensionUri) {
     const vscode = acquireVsCodeApi();
     let currentData = null;
     let selectedTemplate = null;
-    let capabilities = [];
+    let selectedSpecs = [];
     let constraints = [];
+    let specDefinitions = [];
+    let selectedSpecId = '';
+
+    function debug(message, data) {
+      console.log('[ExpertManager webview]', message, data ?? '');
+      vscode.postMessage({ command: 'debug', message, data });
+    }
+
+    window.addEventListener('error', (event) => {
+      debug('window error', {
+        message: event.message,
+        filename: event.filename,
+        lineno: event.lineno,
+        colno: event.colno
+      });
+    });
+
+    window.addEventListener('unhandledrejection', (event) => {
+      debug('unhandled promise rejection', {
+        reason: String(event.reason)
+      });
+    });
 
     // Request initialization
+    debug('posting init request');
     vscode.postMessage({ command: 'init' });
 
     // Handle messages from extension
     window.addEventListener('message', (event) => {
       const message = event.data;
+      debug('received extension message', message);
 
       switch (message.command) {
         case 'loadTemplates':
+          specDefinitions = message.specs || [];
           renderTemplateSelection(message);
           break;
         case 'loadTemplate':
           loadTemplate(message.template);
           break;
         case 'loadExpert':
+          specDefinitions = message.specs || [];
           loadExpert(message.data);
+          break;
+        case 'specSaved':
+          upsertSpec(message.spec);
+          showToast('Spec saved successfully!', 'success');
+          break;
+        case 'specDeleted':
+          removeSpecDefinition(message.id);
+          showToast('Spec deleted.', 'success');
           break;
         case 'saved':
           showToast('Expert saved successfully!', 'success');
@@ -13344,6 +14228,10 @@ function getHtml(_webview, _extensionUri) {
     });
 
     function renderTemplateSelection(data) {
+      debug('renderTemplateSelection', {
+        templateCount: data.templates?.length ?? 0,
+        categoryCount: data.categories?.length ?? 0
+      });
       const { templates, categories } = data;
 
       const html = \`
@@ -13358,7 +14246,7 @@ function getHtml(_webview, _extensionUri) {
           <h2>Choose a Template</h2>
           <div class="template-grid">
             \${templates.map(t => \`
-              <div class="template-card" onclick="selectTemplate('\${t.id}')">
+              <div class="template-card" data-action="select-template" data-template-id="\${t.id}">
                 <h3>\${t.name}</h3>
                 <p>\${t.description}</p>
                 <span class="badge badge-\${t.category}">\${t.category}</span>
@@ -13372,11 +14260,13 @@ function getHtml(_webview, _extensionUri) {
     }
 
     function selectTemplate(templateId) {
+      debug('selectTemplate clicked', { templateId });
       selectedTemplate = templateId;
       vscode.postMessage({ command: 'loadTemplate', templateId });
     }
 
     function loadTemplate(template) {
+      debug('loadTemplate', { templateId: template?.id, templateName: template?.name });
       currentData = { ...template.defaults };
 
       const html = getFormHtml(template);
@@ -13387,6 +14277,7 @@ function getHtml(_webview, _extensionUri) {
     }
 
     function loadExpert(expert) {
+      debug('loadExpert', { slug: expert?.slug, role: expert?.role });
       currentData = { ...expert, _originalSlug: expert.slug };
 
       const html = getFormHtml(null, true);
@@ -13399,14 +14290,19 @@ function getHtml(_webview, _extensionUri) {
     function getFormHtml(template, isEdit = false) {
       const title = isEdit ? 'Edit Expert' : 'Create Expert';
       const selectedTemplateInfo = template ? \`<span class="badge badge-\${template.category}">\${template.name}</span>\` : '';
+      const modeText = isEdit ? 'Update an existing expert definition and verify its routing.' : 'Configure a new expert, then save it into relay.';
 
       return \`
         <div class="header">
-          <h1>\${title} \${selectedTemplateInfo}</h1>
+          <div class="header-copy">
+            <h1>\${title} \${selectedTemplateInfo}</h1>
+            <p>\${modeText}</p>
+          </div>
           <div class="header-actions">
-            \${isEdit ? '<button class="btn btn-danger" onclick="deleteExpert()">Delete</button>' : ''}
-            <button class="btn btn-secondary" onclick="duplicateExpert()">Duplicate</button>
-            <button class="btn" onclick="validateAndSave()">Save</button>
+            <button class="btn btn-secondary" data-action="cancel">Cancel</button>
+            \${isEdit ? '<button class="btn btn-secondary" data-action="duplicate-expert">Duplicate</button>' : ''}
+            \${isEdit ? '<button class="btn btn-danger" data-action="delete-expert">Delete</button>' : ''}
+            <button class="btn btn-primary" data-action="save-expert">Save Expert</button>
           </div>
         </div>
 
@@ -13415,134 +14311,179 @@ function getHtml(_webview, _extensionUri) {
           <ul id="validationErrors"></ul>
         </div>
 
-        <div class="form-section">
-          <h2>Basic Information</h2>
-          <div class="form-row">
-            <div class="form-group">
-              <label class="required">Role Name</label>
-              <input type="text" id="role" placeholder="e.g., Frontend Developer" onchange="generateSlug()">
-              <div class="help-text">The display name for this expert</div>
-            </div>
-            <div class="slug-row">
-              <div class="form-group" style="flex: 1;">
-                <label class="required">Slug</label>
-                <input type="text" id="slug" placeholder="e.g., frontend-developer" onblur="validateSlug()">
-                <div id="slugError" class="error"></div>
-                <div id="slugSuccess" class="success"></div>
+        <div class="page-layout">
+          <div class="main-column">
+            <div class="form-section">
+              <h2>Identity</h2>
+              <div class="form-row">
+                <div class="form-group">
+                  <label class="required">Role Name</label>
+                  <input type="text" id="role" placeholder="e.g., Frontend Developer" onchange="generateSlug()">
+                  <div class="help-text">The display name for this expert</div>
+                </div>
+                <div class="slug-row">
+                  <div class="form-group" style="flex: 1;">
+                    <label class="required">Slug</label>
+                    <input type="text" id="slug" placeholder="e.g., frontend-developer" data-action="validate-slug-on-blur">
+                    <div id="slugError" class="error"></div>
+                    <div id="slugSuccess" class="success"></div>
+                  </div>
+                  <button class="btn-icon" data-action="generate-slug" title="Auto-generate from role name">⚡</button>
+                </div>
               </div>
-              <button class="btn-icon" onclick="generateSlug()" title="Auto-generate from role name">⚡</button>
+              <div class="form-row single">
+                <div class="form-group">
+                  <label>Persona Description</label>
+                  <textarea id="persona" placeholder="Describe this expert's role and approach..."></textarea>
+                </div>
+              </div>
             </div>
-          </div>
-          <div class="form-row">
-            <div class="form-group">
-              <label class="required">Domain</label>
-              <select id="domain">
-                <option value="general">General</option>
-                <option value="development">Development</option>
-              </select>
-            </div>
-            <div class="form-group">
-              <label>Persona Description</label>
-              <textarea id="persona" placeholder="Describe this expert's role and approach..."></textarea>
-            </div>
-          </div>
-        </div>
 
-        <div class="form-section">
-          <h2>Configuration</h2>
-          <div class="form-row">
-            <div class="form-group">
-              <label class="required">Backed By</label>
-              <select id="backed_by">
-                <option value="claude">Claude (Anthropic)</option>
-                <option value="codex">Codex (OpenAI)</option>
-                <option value="gemini">Gemini (Google)</option>
-                <option value="zai">ZAI</option>
-              </select>
-              <div class="help-text">The AI model backing this expert</div>
+            <div class="form-section">
+              <h2>Specs</h2>
+              <div class="help-text" style="margin-bottom: 8px;">Manage spec modules from the project spec store, then attach or detach them for this expert.</div>
+              <div class="capability-browser">
+                <div class="capability-picker">
+                  <select id="capabilityPresets" class="preset-select" size="8"></select>
+                  <div class="preset-actions">
+                    <button class="btn btn-secondary" type="button" data-action="add-selected-capability">Add Selected</button>
+                    <button class="btn btn-secondary" type="button" data-action="new-capability">New Spec</button>
+                    <button class="btn btn-secondary" type="button" data-action="save-spec">Save Spec</button>
+                    <button class="btn btn-danger" type="button" data-action="delete-spec">Delete Spec</button>
+                    <span id="capabilityPresetMeta" class="preset-meta"></span>
+                  </div>
+                </div>
+                <div id="capabilityDetail" class="capability-detail"></div>
+              </div>
+              <div id="capabilitiesList" class="list-editor"></div>
+              <button class="btn-add" data-action="add-capability">
+                <span style="font-size: 16px;">+</span> Add Spec
+              </button>
             </div>
-            <div class="form-group">
-              <label class="required">Tier</label>
-              <select id="tier">
-                <option value="trivial">Trivial (Simple, Low Cost)</option>
-                <option value="standard">Standard (Balanced)</option>
-                <option value="premium">Premium (Complex, High Quality)</option>
-              </select>
-            </div>
-          </div>
-          <div class="form-row">
-            <div class="form-group">
-              <label class="required">Permission Mode</label>
-              <select id="permission_mode">
-                <option value="plan">Plan (Analysis Only)</option>
-                <option value="acceptEdits">Accept Edits (Review & Approve)</option>
-                <option value="default">Default (Full Autonomy)</option>
-              </select>
-            </div>
-            <div class="form-group">
-              <label>Memory Type</label>
-              <select id="memory">
-                <option value="">None</option>
-                <option value="project">Project</option>
-                <option value="user">User</option>
-                <option value="local">Local</option>
-              </select>
-            </div>
-          </div>
-          <div class="form-row">
-            <div class="form-group">
-              <label>CLI Override</label>
-              <input type="text" id="cli" placeholder="e.g., /expert-frontend">
-            </div>
-            <div class="form-group">
-              <label>Model Override</label>
-              <input type="text" id="model" placeholder="e.g., claude-opus-4-6">
-            </div>
-          </div>
-        </div>
 
-        <div class="form-section">
-          <h2>Phase Assignment</h2>
-          <div class="checkbox-group">
-            <label class="checkbox-item" onclick="togglePhase(this, 'probe')">
-              <input type="checkbox" id="phase-probe">
-              <span>Probe (Research)</span>
-            </label>
-            <label class="checkbox-item" onclick="togglePhase(this, 'grasp')">
-              <input type="checkbox" id="phase-grasp">
-              <span>Grasp (Analysis)</span>
-            </label>
-            <label class="checkbox-item" onclick="togglePhase(this, 'tangle')">
-              <input type="checkbox" id="phase-tangle">
-              <span>Tangle (Implementation)</span>
-            </label>
-            <label class="checkbox-item" onclick="togglePhase(this, 'ink')">
-              <input type="checkbox" id="phase-ink">
-              <span>Ink (Documentation)</span>
-            </label>
+            <div class="form-section">
+              <h2>Constraints</h2>
+              <div class="help-text" style="margin-bottom: 8px;">Define rules this expert must follow (e.g., "Always use TypeScript", "No production changes")</div>
+              <div id="constraintsList" class="list-editor"></div>
+              <button class="btn-add" data-action="add-constraint">
+                <span style="font-size: 16px;">+</span> Add Constraint
+              </button>
+            </div>
           </div>
-        </div>
 
-        <div class="form-section">
-          <h2>Capabilities</h2>
-          <div id="capabilitiesList" class="list-editor"></div>
-          <button class="btn-add" onclick="addCapability()">+ Add Capability</button>
-        </div>
+          <div class="side-column">
+            <div class="side-card">
+              <h2>Configuration</h2>
+              <div class="form-row single">
+                <div class="form-group">
+                  <label class="required">Domain</label>
+                  <select id="domain">
+                    <option value="general">General</option>
+                    <option value="development">Development</option>
+                  </select>
+                </div>
+                <div class="form-group">
+                  <label class="required">Backed By</label>
+                  <select id="backed_by">
+                    <option value="claude">Claude (Anthropic)</option>
+                    <option value="codex">Codex (OpenAI)</option>
+                    <option value="gemini">Gemini (Google)</option>
+                    <option value="zai">ZAI</option>
+                  </select>
+                  <div class="help-text">The AI model backing this expert</div>
+                </div>
+                <div class="form-group">
+                  <label class="required">Tier</label>
+                  <select id="tier">
+                    <option value="trivial">Trivial (Simple, Low Cost)</option>
+                    <option value="standard">Standard (Balanced)</option>
+                    <option value="premium">Premium (Complex, High Quality)</option>
+                  </select>
+                </div>
+                <div class="form-group">
+                  <label class="required">Permission Mode</label>
+                  <select id="permission_mode">
+                    <option value="plan">Plan (Analysis Only)</option>
+                    <option value="acceptEdits">Accept Edits (Review & Approve)</option>
+                    <option value="default">Default (Full Autonomy)</option>
+                  </select>
+                </div>
+                <div class="form-group">
+                  <label>Memory Type</label>
+                  <select id="memory">
+                    <option value="">None</option>
+                    <option value="project">Project</option>
+                    <option value="user">User</option>
+                    <option value="local">Local</option>
+                  </select>
+                </div>
+                <div class="form-group">
+                  <label>CLI Override</label>
+                  <input type="text" id="cli" placeholder="e.g., /expert-frontend">
+                </div>
+                <div class="form-group">
+                  <label>Model Override</label>
+                  <input type="text" id="model" placeholder="e.g., claude-opus-4-6">
+                </div>
+              </div>
+            </div>
 
-        <div class="form-section">
-          <h2>Constraints</h2>
-          <div id="constraintsList" class="list-editor"></div>
-          <button class="btn-add" onclick="addConstraint()">+ Add Constraint</button>
+            <div class="side-card">
+              <h2>Phase Assignment</h2>
+              <div class="phase-grid">
+                <label class="checkbox-item" data-action="toggle-phase" data-phase="probe">
+                  <input type="checkbox" id="phase-probe">
+                  <span>Probe (Research)</span>
+                </label>
+                <label class="checkbox-item" data-action="toggle-phase" data-phase="grasp">
+                  <input type="checkbox" id="phase-grasp">
+                  <span>Grasp (Analysis)</span>
+                </label>
+                <label class="checkbox-item" data-action="toggle-phase" data-phase="tangle">
+                  <input type="checkbox" id="phase-tangle">
+                  <span>Tangle (Implementation)</span>
+                </label>
+                <label class="checkbox-item" data-action="toggle-phase" data-phase="ink">
+                  <input type="checkbox" id="phase-ink">
+                  <span>Ink (Documentation)</span>
+                </label>
+              </div>
+            </div>
+
+            <div class="side-card">
+              <h2>Quick Checks</h2>
+              <div class="summary-list">
+                <div class="summary-item">
+                  <strong>Required</strong>
+                  <span>Role, slug, and at least one phase</span>
+                </div>
+                <div class="summary-item">
+                  <strong>Helpful</strong>
+                  <span>Add 2-3 concrete specs and guardrails</span>
+                </div>
+                <div class="summary-item">
+                  <strong>Save Flow</strong>
+                  <span>Validate in the webview, then persist through the extension</span>
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
 
         <div class="actions">
-          <button class="btn btn-secondary" onclick="cancel()">Cancel</button>
-          <button class="btn btn-primary" onclick="validateAndSave()">Save Expert</button>
+          <button class="btn btn-secondary" data-action="cancel">Cancel</button>
+          <button class="btn btn-primary" data-action="save-expert">Save Expert</button>
         </div>
       \`;
     }
 
     function populateForm(data) {
+      debug('populateForm', {
+        slug: data.slug,
+        role: data.role,
+        specs: data.specs?.length ?? 0,
+        constraints: data.constraints?.length ?? 0
+      });
       // Basic fields
       if (data.role) document.getElementById('role').value = data.role;
       if (data.slug) document.getElementById('slug').value = data.slug;
@@ -13567,7 +14508,8 @@ function getHtml(_webview, _extensionUri) {
       }
 
       // Capabilities
-      capabilities = data.capabilities || [];
+      selectedSpecs = normalizeSpecRefs(data.specs || data.capabilities || []);
+      selectedSpecId = selectedSpecs[0] || specDefinitions[0]?.id || '';
       renderCapabilities();
 
       // Constraints
@@ -13582,7 +14524,7 @@ function getHtml(_webview, _extensionUri) {
       if (document.getElementById('phase-tangle').checked) phases.push('tangle');
       if (document.getElementById('phase-ink').checked) phases.push('ink');
 
-      return {
+      const data = {
         role: document.getElementById('role').value.trim(),
         slug: document.getElementById('slug').value.trim(),
         domain: document.getElementById('domain').value,
@@ -13593,14 +14535,31 @@ function getHtml(_webview, _extensionUri) {
         memory: document.getElementById('memory').value || undefined,
         cli: document.getElementById('cli').value || undefined,
         model: document.getElementById('model').value || undefined,
+        fallback_cli: currentData?.fallback_cli,
+        isolation: currentData?.isolation,
+        agent_profile: currentData?.agent_profile,
+        default_platform: currentData?.default_platform,
         phases,
-        capabilities,
+        specs: selectedSpecs,
+        capabilities: [],
         constraints,
+        created_at: currentData?.created_at,
         _originalSlug: currentData?._originalSlug
       };
+
+      debug('collectFormData', {
+        slug: data.slug,
+        role: data.role,
+        phases: data.phases,
+        specs: data.specs.length,
+        constraints: data.constraints.length
+      });
+
+      return data;
     }
 
     function validateAndSave() {
+      debug('validateAndSave clicked');
       const data = collectFormData();
 
       // Basic validation
@@ -13618,6 +14577,7 @@ function getHtml(_webview, _extensionUri) {
       hideValidationErrors();
 
       // Send to extension for validation and save
+      debug('posting save command', { slug: data.slug, originalSlug: data._originalSlug });
       vscode.postMessage({ command: 'save', data });
     }
 
@@ -13637,6 +14597,7 @@ function getHtml(_webview, _extensionUri) {
 
     function generateSlug() {
       const role = document.getElementById('role').value;
+      debug('generateSlug triggered', { role });
       if (role) {
         vscode.postMessage({ command: 'generateSlug', role });
       }
@@ -13645,6 +14606,7 @@ function getHtml(_webview, _extensionUri) {
     function validateSlug() {
       const slug = document.getElementById('slug').value;
       const originalSlug = currentData?._originalSlug;
+      debug('validateSlug triggered', { slug, originalSlug });
 
       if (slug) {
         vscode.postMessage({ command: 'validateSlug', slug, originalSlug });
@@ -13652,6 +14614,7 @@ function getHtml(_webview, _extensionUri) {
     }
 
     function handleSlugValidation(result) {
+      debug('handleSlugValidation', result);
       const errorEl = document.getElementById('slugError');
       const successEl = document.getElementById('slugSuccess');
 
@@ -13664,42 +14627,224 @@ function getHtml(_webview, _extensionUri) {
       }
     }
 
-    function togglePhase(element, phase) {
+    function togglePhase(element, phase, forceChecked) {
       const checkbox = element.querySelector('input');
-      checkbox.checked = !checkbox.checked;
+      checkbox.checked = typeof forceChecked === 'boolean' ? forceChecked : !checkbox.checked;
       element.classList.toggle('selected', checkbox.checked);
+      debug('togglePhase', { phase, checked: checkbox.checked });
     }
 
     function addCapability() {
-      capabilities.push('');
+      selectedSpecId = '';
+      renderCapabilities();
+    }
+
+    function normalizeSpecRefs(values) {
+      return values.map(value => {
+        const matchById = specDefinitions.find(item => item.id === value);
+        if (matchById) return matchById.id;
+
+        const matchByLegacyCapability = specDefinitions.find(item => extractSpecTitle(item) === value);
+        if (matchByLegacyCapability) {return matchByLegacyCapability.id;}
+
+        return value;
+      });
+    }
+
+    function extractSpecTitle(spec) {
+      const titleMatch = spec.content.match(/^#\s+(.+)$/m);
+      return titleMatch ? titleMatch[1].trim() : spec.id;
+    }
+
+    function getSelectedSpecDefinition() {
+      return getSpecDefinition(selectedSpecId);
+    }
+
+    function getSpecDefinition(id) {
+      return specDefinitions.find(item => item.id === id) || null;
+    }
+
+    function upsertSpec(definition) {
+      const existingIndex = specDefinitions.findIndex(item => item.id === definition.id);
+      if (existingIndex >= 0) {
+        specDefinitions[existingIndex] = definition;
+      } else {
+        specDefinitions.push(definition);
+      }
+
+      specDefinitions.sort((a, b) => extractSpecTitle(a).localeCompare(extractSpecTitle(b)));
+      if (!selectedSpecs.includes(definition.id)) {
+        selectedSpecs.push(definition.id);
+      }
+      selectedSpecId = definition.id;
+      renderCapabilities();
+    }
+
+    function removeSpecDefinition(id) {
+      specDefinitions = specDefinitions.filter(spec => spec.id !== id);
+      selectedSpecs = selectedSpecs.filter(specId => specId !== id);
+      if (selectedSpecId === id) {
+        selectedSpecId = selectedSpecs[0] || specDefinitions[0]?.id || '';
+      }
+      renderCapabilities();
+    }
+
+    function attachCapability(id) {
+      if (!id) return;
+      if (selectedSpecs.includes(id)) {
+        debug('attachCapability skipped duplicate', { id });
+        selectedSpecId = id;
+        renderCapabilities();
+        return;
+      }
+
+      debug('attachCapability clicked', { id, before: selectedSpecs.length });
+      selectedSpecs.push(id);
+      selectedSpecId = id;
       renderCapabilities();
     }
 
     function removeCapability(index) {
-      capabilities.splice(index, 1);
+      debug('removeCapability clicked', { index, before: selectedSpecs.length });
+      if (selectedSpecs[index] === selectedSpecId) {
+        selectedSpecId = selectedSpecs.find((_, itemIndex) => itemIndex !== index) || specDefinitions[0]?.id || '';
+      }
+      selectedSpecs.splice(index, 1);
       renderCapabilities();
     }
 
-    function updateCapability(index, value) {
-      capabilities[index] = value;
+    function renderCapabilityDetail() {
+      const detail = document.getElementById('capabilityDetail');
+      if (!detail) return;
+
+      if (!selectedSpecId) {
+        detail.innerHTML = \`
+          <h3>Spec Detail</h3>
+          <div class="form-group">
+            <label>Spec ID</label>
+            <input type="text" id="capabilitySpecId" placeholder="e.g., auth-contracts">
+          </div>
+          <div class="form-group">
+            <label>Content</label>
+            <textarea id="capabilityContent" placeholder="# Spec Title&#10;&#10;Describe the functional rule, scope, and expected behavior..."></textarea>
+          </div>
+          <p class="empty">Create a new spec file here, save it, then attach it to this expert.</p>
+        \`;
+        return;
+      }
+
+      const definition = getSelectedSpecDefinition();
+      if (!definition) {
+        detail.innerHTML = '<h3>Spec Detail</h3><p class="empty">Spec definition not found.</p>';
+        return;
+      }
+
+      detail.innerHTML = \`
+        <h3>Spec Detail</h3>
+        <div class="form-group">
+          <label>Spec ID</label>
+          <input type="text" id="capabilitySpecId" value="\${definition.id.replace(/"/g, '&quot;')}" placeholder="e.g., auth-contracts">
+        </div>
+        <div class="form-group">
+          <label>Content</label>
+          <textarea id="capabilityContent" placeholder="Spec content">\${definition.content}</textarea>
+        </div>
+        <p>Scope: \${definition.scope} / Type: \${definition.type} / Version: \${definition.version}</p>
+      \`;
     }
 
     function renderCapabilities() {
+      debug('renderCapabilities', { count: selectedSpecs.length, available: specDefinitions.length });
+      const presets = document.getElementById('capabilityPresets');
+      const presetMeta = document.getElementById('capabilityPresetMeta');
       const container = document.getElementById('capabilitiesList');
-      container.innerHTML = capabilities.map((cap, i) => \`
-        <div class="list-item">
-          <input type="text" value="\${cap}" placeholder="e.g., React development" onchange="updateCapability(\${i}, this.value)">
-          <button class="btn-small" onclick="removeCapability(\${i})" title="Remove">×</button>
-        </div>
-      \`).join('');
+
+      if (presets instanceof HTMLSelectElement) {
+        presets.innerHTML = specDefinitions.map(spec => {
+          const selected = selectedSpecs.includes(spec.id);
+          const scopeTag = spec.scope === 'project' ? '[P]' : '[U]';
+          const suffix = selected ? ' ✓' : '';
+          return \`<option value="\${spec.id}">\${scopeTag} \${extractSpecTitle(spec)}\${suffix}</option>\`;
+        }).join('');
+
+        if (selectedSpecId) {
+          presets.value = selectedSpecId;
+        }
+      }
+
+      if (presetMeta) {
+        const userCount = specDefinitions.filter(s => s.scope !== 'project').length;
+        const projectCount = specDefinitions.filter(s => s.scope === 'project').length;
+        presetMeta.textContent = \`\${specDefinitions.length} specs (\${userCount} user, \${projectCount} project)\`;
+      }
+
+      container.innerHTML = selectedSpecs.map((specId, i) => {
+        const def = getSpecDefinition(specId);
+        const scopeTag = def?.scope === 'project' ? '[P]' : '[U]';
+        const label = (extractSpecTitle(def || { id: specId, content: '' })).replace(/"/g, '&quot;');
+        return \`<div class="list-item\${specId === selectedSpecId ? ' selected' : ''}" data-action="select-capability-detail" data-value="\${specId}">
+          <span style="font-size:10px;opacity:0.6;margin-right:4px">\${scopeTag}</span>
+          <input type="text" value="\${label}" readonly>
+          <button class="btn-small" data-action="remove-capability" data-index="\${i}" title="Remove">Remove</button>
+        </div>\`;
+      }).join('');
+
+      renderCapabilityDetail();
+    }
+
+    function saveCapabilityDefinition() {
+      const idInput = document.getElementById('capabilitySpecId');
+      const contentInput = document.getElementById('capabilityContent');
+
+      if (!(idInput instanceof HTMLInputElement) || !(contentInput instanceof HTMLTextAreaElement)) {
+        return;
+      }
+
+      const id = idInput.value.trim();
+      const content = contentInput.value.trim();
+
+      if (!id) {
+        showToast('Spec ID is required', 'error');
+        return;
+      }
+
+      if (!content) {
+        showToast('Spec content is required', 'error');
+        return;
+      }
+
+      vscode.postMessage({
+        command: 'saveSpec',
+        spec: {
+          id,
+          type: 'spec',
+          scope: 'project',
+          version: getSelectedSpecDefinition()?.version || 1,
+          tags: getSelectedSpecDefinition()?.tags || [],
+          requires: getSelectedSpecDefinition()?.requires,
+          conflicts_with: getSelectedSpecDefinition()?.conflicts_with,
+          content
+        }
+      });
+    }
+
+    function deleteSelectedSpec() {
+      if (!selectedSpecId) {
+        showToast('Select a spec first', 'error');
+        return;
+      }
+
+      vscode.postMessage({ command: 'deleteSpec', id: selectedSpecId });
     }
 
     function addConstraint() {
+      debug('addConstraint clicked', { before: constraints.length });
       constraints.push('');
       renderConstraints();
     }
 
     function removeConstraint(index) {
+      debug('removeConstraint clicked', { index, before: constraints.length });
       constraints.splice(index, 1);
       renderConstraints();
     }
@@ -13709,17 +14854,19 @@ function getHtml(_webview, _extensionUri) {
     }
 
     function renderConstraints() {
+      debug('renderConstraints', { count: constraints.length });
       const container = document.getElementById('constraintsList');
       container.innerHTML = constraints.map((con, i) => \`
         <div class="list-item">
-          <input type="text" value="\${con}" placeholder="e.g., Always use TypeScript" onchange="updateConstraint(\${i}, this.value)">
-          <button class="btn-small" onclick="removeConstraint(\${i})" title="Remove">×</button>
+          <input type="text" value="\${con}" placeholder="e.g., Always use TypeScript, No production code changes" data-action="update-constraint" data-index="\${i}">
+          <button class="btn-small" data-action="remove-constraint" data-index="\${i}" title="Remove this constraint">Remove</button>
         </div>
       \`).join('');
     }
 
     function deleteExpert() {
       const slug = currentData?._originalSlug || currentData?.slug;
+      debug('deleteExpert clicked', { slug });
       if (slug) {
         vscode.postMessage({ command: 'delete', slug });
       }
@@ -13727,15 +14874,15 @@ function getHtml(_webview, _extensionUri) {
 
     function duplicateExpert() {
       const slug = currentData?._originalSlug || currentData?.slug;
+      debug('duplicateExpert clicked', { slug });
       if (slug) {
         vscode.postMessage({ command: 'duplicate', slug });
       }
     }
 
     function cancel() {
+      debug('cancel clicked');
       vscode.postMessage({ command: 'cancel' });
-      // Actually just close the panel
-      window.parent.postMessage({ command: 'closePanel' }, '*');
     }
 
     function showToast(message, type = 'info') {
@@ -13747,14 +14894,124 @@ function getHtml(_webview, _extensionUri) {
         toast.classList.remove('show');
       }, 3000);
     }
+
+    document.addEventListener('click', (event) => {
+      const target = event.target.closest('[data-action]');
+      if (!target) return;
+
+      const action = target.dataset.action;
+      const index = target.dataset.index ? Number(target.dataset.index) : undefined;
+
+      switch (action) {
+        case 'select-template':
+          selectTemplate(target.dataset.templateId);
+          break;
+        case 'cancel':
+          cancel();
+          break;
+        case 'duplicate-expert':
+          duplicateExpert();
+          break;
+        case 'delete-expert':
+          deleteExpert();
+          break;
+        case 'save-expert':
+          validateAndSave();
+          break;
+        case 'generate-slug':
+          generateSlug();
+          break;
+        case 'add-capability':
+          addCapability();
+          break;
+        case 'add-selected-capability': {
+          const presets = document.getElementById('capabilityPresets');
+          if (presets instanceof HTMLSelectElement) {
+            attachCapability(presets.value);
+          }
+          break;
+        }
+        case 'save-capability':
+          saveCapabilityDefinition();
+          break;
+        case 'save-spec':
+          saveCapabilityDefinition();
+          break;
+        case 'delete-spec':
+          deleteSelectedSpec();
+          break;
+        case 'new-capability':
+          addCapability();
+          break;
+        case 'remove-capability':
+          if (index !== undefined) removeCapability(index);
+          break;
+        case 'select-capability-detail':
+          if (!(target instanceof HTMLInputElement) && target.dataset.value !== undefined) {
+            selectedSpecId = target.dataset.value;
+            renderCapabilities();
+          }
+          break;
+        case 'add-constraint':
+          addConstraint();
+          break;
+        case 'remove-constraint':
+          if (index !== undefined) removeConstraint(index);
+          break;
+        case 'toggle-phase':
+          if (event.target instanceof HTMLInputElement) {
+            target.classList.toggle('selected', event.target.checked);
+            debug('togglePhase', { phase: target.dataset.phase, checked: event.target.checked });
+          } else {
+            togglePhase(target, target.dataset.phase);
+          }
+          break;
+      }
+    });
+
+    document.addEventListener('change', (event) => {
+      const target = event.target;
+      if (target instanceof HTMLInputElement) {
+        const action = target.dataset.action;
+        const index = target.dataset.index ? Number(target.dataset.index) : undefined;
+
+        if (action === 'update-constraint' && index !== undefined) {
+          updateConstraint(index, target.value);
+        }
+      }
+
+      if (target instanceof HTMLSelectElement && target.id === 'capabilityPresets') {
+        selectedSpecId = target.value;
+        renderCapabilities();
+      }
+
+      if (target instanceof HTMLInputElement && target.id.startsWith('phase-')) {
+        const phaseItem = target.closest('.checkbox-item');
+        if (phaseItem) {
+          phaseItem.classList.toggle('selected', target.checked);
+          debug('togglePhase', { phase: phaseItem.dataset.phase, checked: target.checked });
+        }
+      }
+    });
+
+    document.addEventListener('focusout', (event) => {
+      const target = event.target;
+      if (!(target instanceof HTMLElement)) return;
+      if (target.dataset.action === 'validate-slug-on-blur') {
+        validateSlug();
+      }
+    });
   </script>
 </body>
 </html>`;
 }
+function getExpertManagerHtmlForTest() {
+    return getHtml({}, {});
+}
 
 
 /***/ }),
-/* 88 */
+/* 90 */
 /***/ ((__unused_webpack_module, exports, __webpack_require__) => {
 
 
@@ -13765,8 +15022,8 @@ function getHtml(_webview, _extensionUri) {
  */
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.expertManagerService = exports.ExpertManagerService = void 0;
-const FileService_1 = __webpack_require__(3);
-const ValidationService_1 = __webpack_require__(83);
+const FileService_1 = __webpack_require__(5);
+const ValidationService_1 = __webpack_require__(86);
 class ExpertManagerService {
     // ==========================================================================
     // Templates
@@ -14162,6 +15419,22 @@ class ExpertManagerService {
             ]
         };
     }
+    getCapabilitySuggestions() {
+        const suggestions = new Set();
+        this.templates.forEach(template => {
+            template.defaults.capabilities?.forEach(capability => {
+                const value = capability.trim();
+                if (value) {
+                    suggestions.add(value);
+                }
+            });
+        });
+        return Array.from(suggestions).sort((a, b) => a.localeCompare(b));
+    }
+    /** @deprecated Spec modules are now managed via TemplateService specs */
+    async ensureDefaultCapabilities() {
+        return [];
+    }
     // ==========================================================================
     // Slug Generation
     // ==========================================================================
@@ -14199,7 +15472,7 @@ exports.expertManagerService = new ExpertManagerService();
 
 
 /***/ }),
-/* 89 */
+/* 91 */
 /***/ (function(__unused_webpack_module, exports, __webpack_require__) {
 
 
@@ -14247,8 +15520,8 @@ var __importStar = (this && this.__importStar) || (function () {
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.openDomainSettings = openDomainSettings;
 const vscode = __importStar(__webpack_require__(1));
-const ConfigService_1 = __webpack_require__(90);
-const webview_1 = __webpack_require__(86);
+const ConfigService_1 = __webpack_require__(92);
+const webview_1 = __webpack_require__(88);
 let currentPanel;
 function openDomainSettings(extensionUri) {
     if (currentPanel) {
@@ -14681,7 +15954,7 @@ function getHtml(webview) {
 
 
 /***/ }),
-/* 90 */
+/* 92 */
 /***/ (function(__unused_webpack_module, exports, __webpack_require__) {
 
 
@@ -14729,10 +16002,10 @@ var __importStar = (this && this.__importStar) || (function () {
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.configService = exports.ConfigService = void 0;
 const vscode = __importStar(__webpack_require__(1));
-const fs = __importStar(__webpack_require__(5));
+const fs = __importStar(__webpack_require__(3));
 const path = __importStar(__webpack_require__(4));
-const FileService_1 = __webpack_require__(3);
-const pathResolver_1 = __webpack_require__(91);
+const FileService_1 = __webpack_require__(5);
+const pathResolver_1 = __webpack_require__(93);
 class ConfigService {
     CONFIG_FILE = 'domain-config.json';
     CLAUDE_CONFIG = 'settings.json';
@@ -15065,14 +16338,12 @@ exports.configService = new ConfigService();
 
 
 /***/ }),
-/* 91 */
+/* 93 */
 /***/ (function(__unused_webpack_module, exports, __webpack_require__) {
 
 
 /**
  * pathResolver - Resolve .claude/relay directory paths
- *
- * Provides centralized path resolution for all relay-plugin data locations.
  */
 var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
     if (k2 === undefined) k2 = k;
@@ -15115,6 +16386,12 @@ exports.getExpertsDir = getExpertsDir;
 exports.getTeamsDir = getTeamsDir;
 exports.getAgentDefinitionsDir = getAgentDefinitionsDir;
 exports.getDomainConfigPath = getDomainConfigPath;
+exports.getProjectTemplatesRoot = getProjectTemplatesRoot;
+exports.getProjectSpecsDir = getProjectSpecsDir;
+exports.getProjectPlatformsDir = getProjectPlatformsDir;
+exports.getProjectPoliciesDir = getProjectPoliciesDir;
+exports.getProjectDefinitionsDir = getProjectDefinitionsDir;
+exports.getNotifyEventsDir = getNotifyEventsDir;
 exports.getExpertPath = getExpertPath;
 exports.getTeamPath = getTeamPath;
 exports.getAgentDefinitionPath = getAgentDefinitionPath;
@@ -15122,124 +16399,78 @@ exports.checkRelayStructure = checkRelayStructure;
 exports.ensureRelayStructure = ensureRelayStructure;
 const vscode = __importStar(__webpack_require__(1));
 const path = __importStar(__webpack_require__(4));
-const fs = __importStar(__webpack_require__(5));
-/**
- * Get the workspace root folder
- *
- * @returns Workspace root path or empty string if no workspace open
- */
+const fs = __importStar(__webpack_require__(3));
 function getWorkspaceRoot() {
     return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
 }
-/**
- * Get the .claude directory root
- *
- * @returns Path to .claude directory
- */
 function getClaudeRoot() {
     return path.join(getWorkspaceRoot(), '.claude');
 }
-/**
- * Get the relay plugin root directory
- *
- * @returns Path to .claude/relay directory
- */
 function getRelayRoot() {
     return path.join(getClaudeRoot(), 'relay');
 }
-/**
- * Get the experts directory
- *
- * @returns Path to .claude/relay/experts directory
- */
 function getExpertsDir() {
     return path.join(getRelayRoot(), 'experts');
 }
-/**
- * Get the teams directory
- *
- * @returns Path to .claude/relay/teams directory
- */
 function getTeamsDir() {
     return path.join(getRelayRoot(), 'teams');
 }
-/**
- * Get the agent library definitions directory
- *
- * @returns Path to .claude/relay/agent-library/definitions directory
- */
 function getAgentDefinitionsDir() {
     return path.join(getRelayRoot(), 'agent-library', 'definitions');
 }
-/**
- * Get the domain config file path
- *
- * @returns Path to .claude/relay/domain-config.json
- */
 function getDomainConfigPath() {
     return path.join(getRelayRoot(), 'domain-config.json');
 }
-/**
- * Get expert file path by slug
- *
- * @param slug - Expert slug
- * @returns Path to expert markdown file
- */
+/** Project scope template root */
+function getProjectTemplatesRoot() {
+    return path.join(getRelayRoot(), 'templates');
+}
+function getProjectSpecsDir() {
+    return path.join(getProjectTemplatesRoot(), 'modules', 'specs');
+}
+function getProjectPlatformsDir() {
+    return path.join(getProjectTemplatesRoot(), 'modules', 'platforms');
+}
+function getProjectPoliciesDir() {
+    return path.join(getProjectTemplatesRoot(), 'modules', 'policies');
+}
+function getProjectDefinitionsDir() {
+    return path.join(getProjectTemplatesRoot(), 'definitions');
+}
+function getNotifyEventsDir() {
+    return path.join(getRelayRoot(), 'notify', 'events');
+}
 function getExpertPath(slug) {
     return path.join(getExpertsDir(), `${slug}.md`);
 }
-/**
- * Get team file path by slug
- *
- * @param slug - Team slug
- * @returns Path to team JSON file
- */
 function getTeamPath(slug) {
     return path.join(getTeamsDir(), `${slug}.json`);
 }
-/**
- * Get agent definition file path by ID
- *
- * @param id - Agent definition ID
- * @returns Path to agent definition JSON file
- */
 function getAgentDefinitionPath(id) {
     return path.join(getAgentDefinitionsDir(), `${id}.json`);
 }
-/**
- * Check if relay directory structure exists
- *
- * @returns Object indicating which directories exist
- */
 function checkRelayStructure() {
     const root = getRelayRoot();
     return {
         relayExists: fs.existsSync(root),
         expertsExists: fs.existsSync(getExpertsDir()),
         teamsExists: fs.existsSync(getTeamsDir()),
-        agentLibraryExists: fs.existsSync(getAgentDefinitionsDir())
+        templatesExists: fs.existsSync(getProjectTemplatesRoot())
     };
 }
-/**
- * Ensure all relay directories exist
- *
- * @returns Path to relay root
- * @throws Error if workspace is not open
- */
 function ensureRelayStructure() {
     const root = getRelayRoot();
     if (!getWorkspaceRoot()) {
         throw new Error('No workspace folder is open');
     }
-    // Create relay directory
-    if (!fs.existsSync(root)) {
-        fs.mkdirSync(root, { recursive: true });
-    }
-    // Create subdirectories
     const dirs = [
+        root,
         getExpertsDir(),
         getTeamsDir(),
-        getAgentDefinitionsDir()
+        getProjectTemplatesRoot(),
+        getProjectSpecsDir(),
+        getProjectPoliciesDir(),
+        getProjectDefinitionsDir()
     ];
     dirs.forEach(dir => {
         if (!fs.existsSync(dir)) {
@@ -15247,6 +16478,761 @@ function ensureRelayStructure() {
         }
     });
     return root;
+}
+
+
+/***/ }),
+/* 94 */
+/***/ (function(__unused_webpack_module, exports, __webpack_require__) {
+
+
+/**
+ * SpecBrowserPanel - Browse and manage user/project scope spec modules
+ */
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.openSpecBrowser = openSpecBrowser;
+const vscode = __importStar(__webpack_require__(1));
+const path = __importStar(__webpack_require__(4));
+const fs = __importStar(__webpack_require__(3));
+const webview_1 = __webpack_require__(88);
+let currentPanel;
+function openSpecBrowser(extensionUri, templateService, fileService) {
+    if (currentPanel) {
+        currentPanel.reveal();
+        return;
+    }
+    currentPanel = vscode.window.createWebviewPanel('specBrowser', 'Spec Browser', vscode.ViewColumn.One, { enableScripts: true, retainContextWhenHidden: true });
+    currentPanel.onDidDispose(() => { currentPanel = undefined; });
+    currentPanel.webview.html = getHtml(currentPanel.webview);
+    currentPanel.webview.onDidReceiveMessage(async (msg) => {
+        const panel = currentPanel;
+        if (!panel) {
+            return;
+        }
+        switch (msg.command) {
+            case 'init':
+                await sendSpecList(panel, templateService, msg.filter);
+                break;
+            case 'filter':
+                await sendSpecList(panel, templateService, msg.type);
+                break;
+            case 'fork':
+                await handleFork(panel, templateService, msg.id, msg.specType);
+                break;
+            case 'deleteProjectSpec':
+                await handleDelete(panel, templateService, fileService, msg.id, msg.specType);
+                break;
+            case 'openFile':
+                await handleOpenFile(fileService, templateService, msg.id, msg.scope, msg.specType);
+                break;
+            case 'diff':
+                await handleDiff(fileService, templateService, msg.id, msg.specType);
+                break;
+            case 'newSpec':
+                await handleNewSpec(panel, templateService, fileService);
+                break;
+        }
+    });
+}
+// ==========================================================================
+// Handlers
+// ==========================================================================
+async function sendSpecList(panel, templateService, filter) {
+    const specs = await templateService.listSpecs(filter);
+    const hasUserScope = templateService.hasUserScope();
+    panel.webview.postMessage({
+        command: 'specs',
+        specs: specs.map(s => ({
+            id: s.id,
+            type: s.effective.type,
+            scope: s.effective.scope,
+            version: s.effective.version,
+            tags: s.effective.tags ?? [],
+            overridden: !!s.overridden_by,
+            content: s.effective.content.slice(0, 200)
+        })),
+        hasUserScope
+    });
+}
+async function handleFork(panel, templateService, id, _specType) {
+    try {
+        await templateService.forkToProject(id);
+        panel.webview.postMessage({ command: 'forkSuccess', id });
+        vscode.window.showInformationMessage(`Spec "${id}" forked to project scope.`);
+        vscode.commands.executeCommand('agentManager.refreshTree');
+        await sendSpecList(panel, templateService);
+    }
+    catch (err) {
+        panel.webview.postMessage({ command: 'error', message: String(err) });
+    }
+}
+async function handleDelete(panel, templateService, fileService, id, specType) {
+    const confirmed = await vscode.window.showWarningMessage(`Delete project spec "${id}"?`, 'Delete', 'Cancel');
+    if (confirmed !== 'Delete') {
+        return;
+    }
+    await templateService.deleteProjectSpec(id, specType);
+    vscode.window.showInformationMessage(`Spec "${id}" deleted.`);
+    vscode.commands.executeCommand('agentManager.refreshTree');
+    await sendSpecList(panel, templateService);
+}
+async function handleOpenFile(fileService, templateService, id, scope, specType) {
+    const pluginRoot = templateService.getPluginRoot();
+    const subDir = specTypeToSubDir(specType, pluginRoot);
+    if (scope === 'project') {
+        const dir = fileService.getProjectDirForType(specType);
+        const filePath = `${dir}/${id}.md`;
+        await vscode.window.showTextDocument(vscode.Uri.file(filePath));
+    }
+    else {
+        if (!pluginRoot) {
+            vscode.window.showWarningMessage('User scope not detected.');
+            return;
+        }
+        const filePath = `${pluginRoot}/docs/templates/modules/${subDir}/${id}.md`;
+        await vscode.window.showTextDocument(vscode.Uri.file(filePath), { preview: true });
+    }
+}
+async function handleDiff(fileService, templateService, id, specType) {
+    const pluginRoot = templateService.getPluginRoot();
+    if (!pluginRoot) {
+        vscode.window.showWarningMessage('User scope not detected — cannot diff.');
+        return;
+    }
+    const subDir = specTypeToSubDir(specType, pluginRoot);
+    const userUri = vscode.Uri.file(`${pluginRoot}/docs/templates/modules/${subDir}/${id}.md`);
+    const projectUri = vscode.Uri.file(`${fileService.getProjectDirForType(specType)}/${id}.md`);
+    await vscode.commands.executeCommand('vscode.diff', userUri, projectUri, `${id}: user scope ↔ project scope`);
+}
+function specTypeToSubDir(type, pluginRoot) {
+    if (type === 'platform') {
+        return 'platforms';
+    }
+    if (type === 'policy') {
+        return 'policies';
+    }
+    if (type === 'base') {
+        return 'base';
+    }
+    // spec: prefer 'specs/', fall back to 'capabilities/' for older installs
+    if (pluginRoot) {
+        const specsDir = path.join(pluginRoot, 'docs', 'templates', 'modules', 'specs');
+        if (!fs.existsSync(specsDir)) {
+            return 'capabilities';
+        }
+    }
+    return 'specs';
+}
+async function handleNewSpec(panel, templateService, fileService) {
+    const specType = await vscode.window.showQuickPick(['spec', 'platform', 'policy'], { placeHolder: 'Select spec type' });
+    if (!specType) {
+        return;
+    }
+    const id = await vscode.window.showInputBox({
+        prompt: `${specType} ID (e.g. my-feature)`,
+        validateInput: v => /^[a-z0-9-]+$/.test(v) ? null : 'Lowercase letters, numbers, and hyphens only'
+    });
+    if (!id) {
+        return;
+    }
+    await templateService.createProjectSpec(id, `# ${id}\n\n<!-- Describe the ${specType} here -->\n`, {
+        type: specType
+    });
+    const dir = fileService.getProjectDirForType(specType);
+    const filePath = `${dir}/${id}.md`;
+    await vscode.window.showTextDocument(vscode.Uri.file(filePath));
+    vscode.commands.executeCommand('agentManager.refreshTree');
+    await sendSpecList(panel, templateService);
+}
+// ==========================================================================
+// HTML
+// ==========================================================================
+function getHtml(webview) {
+    const nonce = (0, webview_1.getNonce)();
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'nonce-${nonce}'; style-src 'unsafe-inline';">
+  <title>Spec Browser</title>
+  <style>
+    :root {
+      --bg: var(--vscode-editor-background);
+      --bg2: var(--vscode-editorWidget-background);
+      --border: var(--vscode-editorWidget-border);
+      --fg: var(--vscode-editor-foreground);
+      --fg2: var(--vscode-descriptionForeground);
+      --accent: var(--vscode-textLink-foreground);
+      --badge-bg: var(--vscode-badge-background);
+      --badge-fg: var(--vscode-badge-foreground);
+      --btn-bg: var(--vscode-button-background);
+      --btn-fg: var(--vscode-button-foreground);
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: var(--vscode-font-family); background: var(--bg); color: var(--fg);
+           padding: 20px; font-size: 13px; }
+    .toolbar { display: flex; justify-content: space-between; align-items: center;
+               margin-bottom: 16px; gap: 8px; flex-wrap: wrap; }
+    .toolbar h1 { font-size: 16px; font-weight: 600; }
+    .filters { display: flex; gap: 6px; }
+    .filter-btn { background: var(--bg2); border: 1px solid var(--border); color: var(--fg);
+                  padding: 4px 12px; border-radius: 4px; cursor: pointer; font-size: 12px; }
+    .filter-btn.active { background: var(--accent); color: var(--bg); border-color: var(--accent); }
+    .btn { background: var(--btn-bg); color: var(--btn-fg); border: none; padding: 6px 14px;
+           border-radius: 4px; cursor: pointer; font-size: 12px; }
+    .btn:hover { opacity: 0.85; }
+    .legend { display: flex; gap: 16px; margin-bottom: 12px; font-size: 11px; color: var(--fg2); }
+    .legend-item { display: flex; align-items: center; gap: 4px; }
+    .badge { display: inline-block; padding: 1px 6px; border-radius: 3px;
+             font-size: 10px; font-weight: 600; }
+    .badge-user    { background: #1f77b4; color: #fff; }
+    .badge-project { background: #2ca02c; color: #fff; }
+    .badge-override { background: #e07b00; color: #fff; }
+    table { width: 100%; border-collapse: collapse; }
+    th { text-align: left; padding: 8px 10px; font-size: 11px; color: var(--fg2);
+         border-bottom: 1px solid var(--border); text-transform: uppercase; letter-spacing: 0.4px; }
+    td { padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+    tr:hover td { background: var(--vscode-list-hoverBackground); }
+    .id-cell { font-family: monospace; font-size: 12px; cursor: pointer; color: var(--accent); }
+    .id-cell:hover { text-decoration: underline; }
+    .actions { display: flex; gap: 4px; }
+    .action-btn { background: none; border: 1px solid var(--border); color: var(--fg2);
+                  padding: 2px 8px; border-radius: 3px; cursor: pointer; font-size: 11px; }
+    .action-btn:hover { background: var(--bg2); color: var(--fg); }
+    .action-btn.danger:hover { border-color: #e03030; color: #e03030; }
+    .tag { display: inline-block; background: var(--badge-bg); color: var(--badge-fg);
+           padding: 1px 6px; border-radius: 3px; font-size: 10px; margin-right: 3px; }
+    .empty { text-align: center; padding: 40px; color: var(--fg2); }
+    .no-user-scope { background: var(--vscode-inputValidation-warningBackground);
+                     border: 1px solid var(--vscode-inputValidation-warningBorder);
+                     padding: 8px 12px; border-radius: 4px; margin-bottom: 12px;
+                     font-size: 12px; color: var(--fg2); }
+  </style>
+</head>
+<body>
+  <div class="toolbar">
+    <h1>Spec Browser</h1>
+    <div style="display:flex;gap:8px;align-items:center">
+      <div class="filters">
+        <button class="filter-btn active" onclick="setFilter(null)">All</button>
+        <button class="filter-btn" onclick="setFilter('spec')">Specs</button>
+        <button class="filter-btn" onclick="setFilter('base')">Base</button>
+        <button class="filter-btn" onclick="setFilter('platform')">Platforms</button>
+        <button class="filter-btn" onclick="setFilter('policy')">Policies</button>
+      </div>
+      <button class="btn" onclick="newSpec()">+ New Spec</button>
+    </div>
+  </div>
+
+  <div id="noUserScope" class="no-user-scope" style="display:none">
+    User scope (relay-plugin) not detected. Only project scope specs are shown.
+    Set the RELAY_PLUGIN_PATH environment variable or place relay-plugin adjacent to the workspace.
+  </div>
+
+  <div class="legend">
+    <span class="legend-item"><span class="badge badge-user">[U]</span> user scope (read-only)</span>
+    <span class="legend-item"><span class="badge badge-project">[P]</span> project scope (editable)</span>
+    <span class="legend-item"><span class="badge badge-override">[P]</span> project overrides user</span>
+  </div>
+
+  <table>
+    <thead>
+      <tr>
+        <th>ID</th>
+        <th>Type</th>
+        <th>Scope</th>
+        <th>Tags</th>
+        <th>Actions</th>
+      </tr>
+    </thead>
+    <tbody id="specTable">
+      <tr><td colspan="5" class="empty">Loading...</td></tr>
+    </tbody>
+  </table>
+
+  <script nonce="${nonce}">
+    const vscode = acquireVsCodeApi();
+    let allSpecs = [];
+    let currentFilter = null;
+
+    vscode.postMessage({ command: 'init' });
+
+    window.addEventListener('message', (e) => {
+      const msg = e.data;
+      if (msg.command === 'specs') {
+        allSpecs = msg.specs;
+        if (!msg.hasUserScope) {
+          document.getElementById('noUserScope').style.display = 'block';
+        }
+        renderTable(allSpecs);
+      }
+    });
+
+    function setFilter(type) {
+      currentFilter = type;
+      document.querySelectorAll('.filter-btn').forEach((btn, i) => {
+        const types = [null, 'spec', 'base', 'platform', 'policy'];
+        btn.classList.toggle('active', types[i] === type);
+      });
+      const filtered = type ? allSpecs.filter(s => s.type === type) : allSpecs;
+      renderTable(filtered);
+    }
+
+    function renderTable(specs) {
+      const tbody = document.getElementById('specTable');
+      if (specs.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="5" class="empty">No specs found.</td></tr>';
+        return;
+      }
+
+      tbody.innerHTML = specs.map(s => {
+        const isProject = s.scope === 'project';
+        const badgeClass = s.overridden ? 'badge-override' : (isProject ? 'badge-project' : 'badge-user');
+        const badge = isProject ? '[P]' : '[U]';
+        const tags = (s.tags || []).map(t => \`<span class="tag">\${t}</span>\`).join('');
+
+        const actions = [];
+        if (!isProject) {
+          actions.push(\`<button class="action-btn" onclick="fork('\${s.id}', '\${s.type}')">Fork to Project</button>\`);
+          actions.push(\`<button class="action-btn" onclick="openFile('\${s.id}', 'user', '\${s.type}')">View</button>\`);
+        } else {
+          actions.push(\`<button class="action-btn" onclick="openFile('\${s.id}', 'project', '\${s.type}')">Edit</button>\`);
+          if (s.overridden) {
+            actions.push(\`<button class="action-btn" onclick="diff('\${s.id}', '\${s.type}')">Diff</button>\`);
+          }
+          actions.push(\`<button class="action-btn danger" onclick="deleteSpec('\${s.id}', '\${s.type}')">Delete</button>\`);
+        }
+
+        return \`<tr>
+          <td class="id-cell" onclick="openFile('\${s.id}', '\${s.scope}', '\${s.type}')">\${s.id}</td>
+          <td><span class="badge badge-user" style="background:transparent;color:var(--fg2)">\${s.type}</span></td>
+          <td><span class="badge \${badgeClass}">\${badge}</span></td>
+          <td>\${tags}</td>
+          <td><div class="actions">\${actions.join('')}</div></td>
+        </tr>\`;
+      }).join('');
+    }
+
+    function fork(id, specType) { vscode.postMessage({ command: 'fork', id, specType }); }
+    function deleteSpec(id, specType) { vscode.postMessage({ command: 'deleteProjectSpec', id, specType }); }
+    function openFile(id, scope, specType) { vscode.postMessage({ command: 'openFile', id, scope, specType }); }
+    function diff(id, specType) { vscode.postMessage({ command: 'diff', id, specType }); }
+    function newSpec() { vscode.postMessage({ command: 'newSpec' }); }
+  </script>
+</body>
+</html>`;
+}
+
+
+/***/ }),
+/* 95 */
+/***/ (function(__unused_webpack_module, exports, __webpack_require__) {
+
+
+/**
+ * ExportImportPanel - Export and import project scope templates
+ */
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.openExportImportPanel = openExportImportPanel;
+const vscode = __importStar(__webpack_require__(1));
+const webview_1 = __webpack_require__(88);
+let currentPanel;
+function openExportImportPanel(extensionUri, fileService, templateService, defaultTab = 'export') {
+    if (currentPanel) {
+        currentPanel.reveal();
+        return;
+    }
+    currentPanel = vscode.window.createWebviewPanel('exportImport', 'Templates: Export / Import', vscode.ViewColumn.Beside, { enableScripts: true, retainContextWhenHidden: true });
+    currentPanel.onDidDispose(() => { currentPanel = undefined; });
+    currentPanel.webview.html = getHtml(currentPanel.webview, defaultTab);
+    currentPanel.webview.onDidReceiveMessage(async (msg) => {
+        const panel = currentPanel;
+        if (!panel) {
+            return;
+        }
+        switch (msg.command) {
+            case 'init':
+                await sendInitData(panel, fileService, templateService);
+                break;
+            case 'browseExportPath':
+                await handleBrowseExport(panel);
+                break;
+            case 'browseImportPath':
+                await handleBrowseImport(panel);
+                break;
+            case 'export':
+                await handleExport(panel, fileService, msg.outputPath);
+                break;
+            case 'import':
+                await handleImport(panel, fileService, msg.sourcePath, msg.conflictMode);
+                break;
+        }
+    });
+}
+// ==========================================================================
+// Handlers
+// ==========================================================================
+async function sendInitData(panel, fileService, templateService) {
+    const projectSpecs = await templateService.listProjectSpecs();
+    const config = await fileService.readDomainConfig();
+    const projectName = config.data?.project_name ?? 'unknown';
+    const defaultExportPath = `./relay-templates-${projectName}-export`;
+    panel.webview.postMessage({
+        command: 'initData',
+        projectSpecCount: projectSpecs.length,
+        projectName,
+        defaultExportPath,
+        relayRoot: fileService.getRelayRoot()
+    });
+}
+async function handleBrowseExport(panel) {
+    const selected = await vscode.window.showOpenDialog({
+        canSelectFolders: true,
+        canSelectFiles: false,
+        canSelectMany: false,
+        openLabel: 'Select Export Directory'
+    });
+    if (selected && selected.length > 0) {
+        panel.webview.postMessage({ command: 'exportPathSelected', path: selected[0].fsPath });
+    }
+}
+async function handleBrowseImport(panel) {
+    const selected = await vscode.window.showOpenDialog({
+        canSelectFolders: true,
+        canSelectFiles: false,
+        canSelectMany: false,
+        openLabel: 'Select Import Directory'
+    });
+    if (selected && selected.length > 0) {
+        panel.webview.postMessage({ command: 'importPathSelected', path: selected[0].fsPath });
+    }
+}
+async function handleExport(panel, fileService, outputPath) {
+    panel.webview.postMessage({ command: 'exportStarted' });
+    const result = await fileService.exportProjectTemplates(outputPath);
+    if (result.success && result.data) {
+        panel.webview.postMessage({
+            command: 'exportDone',
+            meta: result.data,
+            outputPath
+        });
+        const openFolder = await vscode.window.showInformationMessage(`Exported ${result.data.files.length} files to ${outputPath}`, 'Open Folder');
+        if (openFolder === 'Open Folder') {
+            await vscode.commands.executeCommand('revealFileInOS', vscode.Uri.file(outputPath));
+        }
+    }
+    else {
+        panel.webview.postMessage({ command: 'exportError', message: result.error });
+        vscode.window.showErrorMessage(`Export failed: ${result.error}`);
+    }
+}
+async function handleImport(panel, fileService, sourcePath, conflictMode) {
+    panel.webview.postMessage({ command: 'importStarted' });
+    const result = await fileService.importProjectTemplates(sourcePath, conflictMode);
+    if (result.success && result.data) {
+        panel.webview.postMessage({
+            command: 'importDone',
+            imported: result.data.imported,
+            skipped: result.data.skipped
+        });
+        vscode.window.showInformationMessage(`Import complete: ${result.data.imported} imported, ${result.data.skipped} skipped.`);
+        vscode.commands.executeCommand('agentManager.refreshTree');
+    }
+    else {
+        panel.webview.postMessage({ command: 'importError', message: result.error });
+        vscode.window.showErrorMessage(`Import failed: ${result.error}`);
+    }
+}
+// ==========================================================================
+// HTML
+// ==========================================================================
+function getHtml(webview, defaultTab) {
+    const nonce = (0, webview_1.getNonce)();
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'nonce-${nonce}'; style-src 'unsafe-inline';">
+  <title>Templates: Export / Import</title>
+  <style>
+    :root {
+      --bg: var(--vscode-editor-background);
+      --bg2: var(--vscode-editorWidget-background);
+      --border: var(--vscode-editorWidget-border);
+      --fg: var(--vscode-editor-foreground);
+      --fg2: var(--vscode-descriptionForeground);
+      --accent: var(--vscode-textLink-foreground);
+      --btn-bg: var(--vscode-button-background);
+      --btn-fg: var(--vscode-button-foreground);
+      --btn-hover: var(--vscode-button-hoverBackground);
+      --input-bg: var(--vscode-input-background);
+      --input-border: var(--vscode-input-border);
+      --warn-bg: var(--vscode-inputValidation-warningBackground);
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: var(--vscode-font-family); background: var(--bg); color: var(--fg);
+           padding: 24px; font-size: 13px; max-width: 680px; }
+    h1 { font-size: 16px; font-weight: 600; margin-bottom: 20px; }
+    .tabs { display: flex; gap: 0; border-bottom: 1px solid var(--border); margin-bottom: 24px; }
+    .tab { padding: 8px 20px; cursor: pointer; border-bottom: 2px solid transparent;
+           color: var(--fg2); font-size: 13px; }
+    .tab.active { border-bottom-color: var(--accent); color: var(--fg); }
+    .panel { display: none; }
+    .panel.active { display: block; }
+    .field { margin-bottom: 16px; }
+    label { display: block; font-size: 11px; color: var(--fg2); margin-bottom: 6px;
+            text-transform: uppercase; letter-spacing: 0.4px; }
+    .input-row { display: flex; gap: 8px; }
+    input[type="text"] { flex: 1; background: var(--input-bg); border: 1px solid var(--input-border);
+                          color: var(--fg); padding: 6px 10px; border-radius: 4px; font-size: 13px; }
+    input[type="text"]:focus { outline: none; border-color: var(--accent); }
+    .btn { background: var(--btn-bg); color: var(--btn-fg); border: none; padding: 6px 16px;
+           border-radius: 4px; cursor: pointer; font-size: 13px; }
+    .btn:hover { background: var(--btn-hover); }
+    .btn-secondary { background: var(--bg2); color: var(--fg); border: 1px solid var(--border); }
+    .btn-secondary:hover { background: var(--border); }
+    .radio-group { display: flex; flex-direction: column; gap: 8px; }
+    .radio-row { display: flex; align-items: flex-start; gap: 8px; }
+    .radio-row input { margin-top: 2px; }
+    .radio-label { font-size: 13px; }
+    .radio-desc { font-size: 11px; color: var(--fg2); }
+    .info-box { background: var(--bg2); border: 1px solid var(--border); border-radius: 4px;
+                padding: 12px; margin-bottom: 16px; }
+    .info-box .title { font-weight: 600; margin-bottom: 6px; }
+    .info-box .detail { font-size: 12px; color: var(--fg2); line-height: 1.6; }
+    .status { padding: 10px 14px; border-radius: 4px; margin-top: 16px; display: none; }
+    .status.info  { background: var(--vscode-inputValidation-infoBackground); }
+    .status.success { background: var(--vscode-inputValidation-infoBackground); }
+    .status.error { background: var(--vscode-inputValidation-errorBackground); }
+    .actions-row { display: flex; gap: 8px; margin-top: 20px; }
+    .file-list { margin-top: 8px; font-size: 11px; color: var(--fg2); line-height: 1.8;
+                 max-height: 120px; overflow-y: auto; }
+  </style>
+</head>
+<body>
+  <h1>Templates: Export / Import</h1>
+
+  <div class="tabs">
+    <div class="tab ${defaultTab === 'export' ? 'active' : ''}" onclick="switchTab('export')">Export</div>
+    <div class="tab ${defaultTab === 'import' ? 'active' : ''}" onclick="switchTab('import')">Import</div>
+  </div>
+
+  <!-- Export Panel -->
+  <div id="exportPanel" class="panel ${defaultTab === 'export' ? 'active' : ''}">
+    <div class="info-box">
+      <div class="title">Export Project Scope Templates</div>
+      <div class="detail" id="exportInfo">Loading...</div>
+    </div>
+
+    <div class="field">
+      <label>Output Directory</label>
+      <div class="input-row">
+        <input type="text" id="exportPath" placeholder="./relay-templates-export">
+        <button class="btn btn-secondary" onclick="browseExport()">Browse</button>
+      </div>
+    </div>
+
+    <div class="actions-row">
+      <button class="btn" id="exportBtn" onclick="doExport()">Export</button>
+    </div>
+
+    <div id="exportStatus" class="status"></div>
+  </div>
+
+  <!-- Import Panel -->
+  <div id="importPanel" class="panel ${defaultTab === 'import' ? 'active' : ''}">
+    <div class="field">
+      <label>Source Directory</label>
+      <div class="input-row">
+        <input type="text" id="importPath" placeholder="/path/to/relay-templates-export">
+        <button class="btn btn-secondary" onclick="browseImport()">Browse</button>
+      </div>
+    </div>
+
+    <div class="field">
+      <label>Conflict Resolution</label>
+      <div class="radio-group">
+        <div class="radio-row">
+          <input type="radio" name="conflict" value="skip" id="r-skip" checked>
+          <div>
+            <div class="radio-label"><label for="r-skip" style="text-transform:none;letter-spacing:0">Skip</label></div>
+            <div class="radio-desc">Keep existing files. Conflicting imports are ignored.</div>
+          </div>
+        </div>
+        <div class="radio-row">
+          <input type="radio" name="conflict" value="overwrite" id="r-overwrite">
+          <div>
+            <div class="radio-label"><label for="r-overwrite" style="text-transform:none;letter-spacing:0">Overwrite</label></div>
+            <div class="radio-desc">Replace all existing files with imported versions.</div>
+          </div>
+        </div>
+        <div class="radio-row">
+          <input type="radio" name="conflict" value="rename" id="r-rename">
+          <div>
+            <div class="radio-label"><label for="r-rename" style="text-transform:none;letter-spacing:0">Rename</label></div>
+            <div class="radio-desc">Save conflicting imports with .imported suffix.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="actions-row">
+      <button class="btn" id="importBtn" onclick="doImport()">Import</button>
+    </div>
+
+    <div id="importStatus" class="status"></div>
+  </div>
+
+  <script nonce="${nonce}">
+    const vscode = acquireVsCodeApi();
+
+    vscode.postMessage({ command: 'init' });
+
+    window.addEventListener('message', (e) => {
+      const msg = e.data;
+      switch (msg.command) {
+        case 'initData':
+          document.getElementById('exportPath').value = msg.defaultExportPath;
+          document.getElementById('exportInfo').textContent =
+            msg.projectSpecCount + ' project scope files will be exported from ' + msg.relayRoot + '/templates/';
+          break;
+        case 'exportPathSelected':
+          document.getElementById('exportPath').value = msg.path;
+          break;
+        case 'importPathSelected':
+          document.getElementById('importPath').value = msg.path;
+          break;
+        case 'exportStarted':
+          setStatus('exportStatus', 'info', 'Exporting...');
+          document.getElementById('exportBtn').disabled = true;
+          break;
+        case 'exportDone':
+          setStatus('exportStatus', 'success',
+            'Exported ' + msg.meta.files.length + ' files to ' + msg.outputPath);
+          document.getElementById('exportBtn').disabled = false;
+          break;
+        case 'exportError':
+          setStatus('exportStatus', 'error', 'Error: ' + msg.message);
+          document.getElementById('exportBtn').disabled = false;
+          break;
+        case 'importStarted':
+          setStatus('importStatus', 'info', 'Importing...');
+          document.getElementById('importBtn').disabled = true;
+          break;
+        case 'importDone':
+          setStatus('importStatus', 'success',
+            'Imported ' + msg.imported + ' files. Skipped: ' + msg.skipped);
+          document.getElementById('importBtn').disabled = false;
+          break;
+        case 'importError':
+          setStatus('importStatus', 'error', 'Error: ' + msg.message);
+          document.getElementById('importBtn').disabled = false;
+          break;
+      }
+    });
+
+    function switchTab(tab) {
+      document.querySelectorAll('.tab').forEach((t, i) => {
+        t.classList.toggle('active', ['export','import'][i] === tab);
+      });
+      document.querySelectorAll('.panel').forEach((p, i) => {
+        p.classList.toggle('active', ['export','import'][i] === tab);
+      });
+    }
+
+    function browseExport() { vscode.postMessage({ command: 'browseExportPath' }); }
+    function browseImport() { vscode.postMessage({ command: 'browseImportPath' }); }
+
+    function doExport() {
+      const outputPath = document.getElementById('exportPath').value.trim();
+      if (!outputPath) { alert('Enter an output directory.'); return; }
+      vscode.postMessage({ command: 'export', outputPath });
+    }
+
+    function doImport() {
+      const sourcePath = document.getElementById('importPath').value.trim();
+      if (!sourcePath) { alert('Enter a source directory.'); return; }
+      const conflictMode = document.querySelector('input[name="conflict"]:checked').value;
+      vscode.postMessage({ command: 'import', sourcePath, conflictMode });
+    }
+
+    function setStatus(id, type, text) {
+      const el = document.getElementById(id);
+      el.style.display = 'block';
+      el.className = 'status ' + type;
+      el.textContent = text;
+    }
+  </script>
+</body>
+</html>`;
 }
 
 

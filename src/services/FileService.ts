@@ -2,14 +2,18 @@
  * FileService - Core file operations for relay-plugin data
  *
  * Handles reading/writing expert definitions, team configurations,
- * agent definitions, and domain config from .claude/relay/ directory.
+ * spec modules, and domain config from .claude/relay/ directory.
  */
 
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as yaml from 'yaml';
-import { Expert, Team, DomainConfig, AgentDefinition, ServiceResult } from '../types';
+import {
+  Expert, Team, DomainConfig, AgentDefinition,
+  ServiceResult, CapabilityDefinition, SpecDefinition, SpecType, TemplateExportMeta
+} from '../types';
+import { generateUniqueSlug, slugify } from '../utils/slugify';
 
 export class FileService {
   private workspaceRoot: string;
@@ -44,6 +48,45 @@ export class FileService {
     return path.join(this.relayRoot, 'domain-config.json');
   }
 
+  /** Project scope template root: {workspace}/.claude/relay/templates/ */
+  getProjectTemplatesRoot(): string {
+    return path.join(this.relayRoot, 'templates');
+  }
+
+  getProjectSpecsDir(): string {
+    return path.join(this.relayRoot, 'templates', 'modules', 'specs');
+  }
+
+  getProjectPlatformsDir(): string {
+    return path.join(this.relayRoot, 'templates', 'modules', 'platforms');
+  }
+
+  getProjectPoliciesDir(): string {
+    return path.join(this.relayRoot, 'templates', 'modules', 'policies');
+  }
+
+  getProjectBaseDir(): string {
+    return path.join(this.relayRoot, 'templates', 'modules', 'base');
+  }
+
+  getProjectDefinitionsDir(): string {
+    return path.join(this.relayRoot, 'templates', 'definitions');
+  }
+
+  /** Return the project-scope directory for a given spec type */
+  getProjectDirForType(type: SpecType): string {
+    switch (type) {
+      case 'platform': return this.getProjectPlatformsDir();
+      case 'policy':   return this.getProjectPoliciesDir();
+      case 'base':     return this.getProjectBaseDir();
+      default:         return this.getProjectSpecsDir();
+    }
+  }
+
+  getNotifyEventsDir(): string {
+    return path.join(this.relayRoot, 'notify', 'events');
+  }
+
   // ==========================================================================
   // Expert Operations
   // ==========================================================================
@@ -59,7 +102,6 @@ export class FileService {
       const experts: Expert[] = [];
 
       for (const file of files) {
-        const filePath = path.join(expertsDir, file);
         const expert = await this.readExpert(path.parse(file).name);
         if (expert.success && expert.data) {
           experts.push(expert.data);
@@ -93,7 +135,6 @@ export class FileService {
     try {
       const filePath = path.join(this.getExpertsDir(), `${expert.slug}.md`);
 
-      // Ensure directory exists
       if (!fs.existsSync(this.getExpertsDir())) {
         fs.mkdirSync(this.getExpertsDir(), { recursive: true });
       }
@@ -134,6 +175,181 @@ export class FileService {
 
       fs.unlinkSync(filePath);
       return { success: true };
+    } catch (error) {
+      return { success: false, error: String(error) };
+    }
+  }
+
+  // ==========================================================================
+  // Project Scope Spec Operations
+  // ==========================================================================
+
+  async listProjectSpecs(): Promise<ServiceResult<SpecDefinition[]>> {
+    try {
+      const typeDirs: Array<{ dir: string; type: SpecType }> = [
+        { dir: this.getProjectSpecsDir(),     type: 'spec' },
+        { dir: this.getProjectPlatformsDir(), type: 'platform' },
+        { dir: this.getProjectPoliciesDir(),  type: 'policy' },
+        { dir: this.getProjectBaseDir(),      type: 'base' }
+      ];
+
+      const specs: SpecDefinition[] = [];
+
+      for (const { dir, type } of typeDirs) {
+        if (!fs.existsSync(dir)) { continue; }
+        const files = fs.readdirSync(dir).filter(f => f.endsWith('.md'));
+        for (const file of files) {
+          const result = await this.readProjectSpec(path.parse(file).name, type);
+          if (result.success && result.data) {
+            specs.push(result.data);
+          }
+        }
+      }
+
+      return { success: true, data: specs };
+    } catch (error) {
+      return { success: false, error: String(error) };
+    }
+  }
+
+  async readProjectSpec(id: string, type: SpecType = 'spec'): Promise<ServiceResult<SpecDefinition>> {
+    try {
+      const dir = this.getProjectDirForType(type);
+      const filePath = path.join(dir, `${id}.md`);
+      if (!fs.existsSync(filePath)) {
+        return { success: false, error: `Project spec not found: ${id}` };
+      }
+
+      const content = fs.readFileSync(filePath, 'utf-8');
+      const spec = this.parseSpecMarkdown(content, 'project');
+      spec.id = id;
+      return { success: true, data: spec };
+    } catch (error) {
+      return { success: false, error: String(error) };
+    }
+  }
+
+  async writeProjectSpec(id: string, spec: SpecDefinition): Promise<ServiceResult<void>> {
+    try {
+      const dir = this.getProjectDirForType(spec.type);
+      if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+      }
+
+      const content = this.generateSpecMarkdown({ ...spec, scope: 'project' });
+      fs.writeFileSync(path.join(dir, `${id}.md`), content, 'utf-8');
+      return { success: true };
+    } catch (error) {
+      return { success: false, error: String(error) };
+    }
+  }
+
+  async deleteProjectSpec(id: string, type: SpecType = 'spec'): Promise<ServiceResult<void>> {
+    try {
+      const dir = this.getProjectDirForType(type);
+      const filePath = path.join(dir, `${id}.md`);
+      if (!fs.existsSync(filePath)) {
+        return { success: false, error: `Project spec not found: ${id}` };
+      }
+      fs.unlinkSync(filePath);
+      return { success: true };
+    } catch (error) {
+      return { success: false, error: String(error) };
+    }
+  }
+
+  // ==========================================================================
+  // Export / Import Operations
+  // ==========================================================================
+
+  async exportProjectTemplates(outputPath: string): Promise<ServiceResult<TemplateExportMeta>> {
+    try {
+      const templatesRoot = this.getProjectTemplatesRoot();
+      if (!fs.existsSync(templatesRoot)) {
+        return { success: false, error: 'No project templates found. Run /relay:setup first.' };
+      }
+
+      if (!fs.existsSync(outputPath)) {
+        fs.mkdirSync(outputPath, { recursive: true });
+      }
+
+      const configResult = await this.readDomainConfig();
+      const projectName = configResult.data?.project_name ?? 'unknown';
+
+      const copiedFiles: string[] = [];
+      this.copyDirRecursive(templatesRoot, outputPath, copiedFiles);
+
+      const meta: TemplateExportMeta = {
+        exported_at: new Date().toISOString(),
+        source_project: projectName,
+        scope: 'project',
+        files: copiedFiles
+      };
+
+      fs.writeFileSync(
+        path.join(outputPath, 'relay-templates-export.json'),
+        JSON.stringify(meta, null, 2),
+        'utf-8'
+      );
+
+      return { success: true, data: meta };
+    } catch (error) {
+      return { success: false, error: String(error) };
+    }
+  }
+
+  async importProjectTemplates(
+    sourcePath: string,
+    conflictMode: 'skip' | 'overwrite' | 'rename'
+  ): Promise<ServiceResult<{ imported: number; skipped: number }>> {
+    try {
+      const metaPath = path.join(sourcePath, 'relay-templates-export.json');
+      if (!fs.existsSync(metaPath)) {
+        return { success: false, error: 'relay-templates-export.json not found in source path' };
+      }
+
+      const meta: TemplateExportMeta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
+      const destRoot = this.getProjectTemplatesRoot();
+
+      if (!fs.existsSync(destRoot)) {
+        fs.mkdirSync(destRoot, { recursive: true });
+      }
+
+      let imported = 0;
+      let skipped = 0;
+
+      for (const relFile of meta.files) {
+        const srcFile = path.join(sourcePath, relFile);
+        let destFile = path.join(destRoot, relFile);
+
+        if (!fs.existsSync(srcFile)) {
+          continue;
+        }
+
+        if (fs.existsSync(destFile)) {
+          if (conflictMode === 'skip') {
+            skipped++;
+            continue;
+          } else if (conflictMode === 'rename') {
+            destFile = destFile.replace(/\.md$/, '.imported.md');
+          }
+          // 'overwrite' falls through
+        }
+
+        const destDir = path.dirname(destFile);
+        if (!fs.existsSync(destDir)) {
+          fs.mkdirSync(destDir, { recursive: true });
+        }
+
+        // Ensure scope: project in frontmatter
+        let content = fs.readFileSync(srcFile, 'utf-8');
+        content = this.ensureProjectScope(content);
+
+        fs.writeFileSync(destFile, content, 'utf-8');
+        imported++;
+      }
+
+      return { success: true, data: { imported, skipped } };
     } catch (error) {
       return { success: false, error: String(error) };
     }
@@ -257,6 +473,60 @@ export class FileService {
   }
 
   // ==========================================================================
+  // Legacy compatibility wrappers (deprecated, use SpecDefinition APIs)
+  // ==========================================================================
+
+  /** @deprecated Use TemplateService.listSpecs() instead */
+  async listCapabilities(): Promise<ServiceResult<CapabilityDefinition[]>> {
+    return { success: true, data: [] };
+  }
+
+  /** @deprecated Use TemplateService.resolveSpec() instead */
+  async readCapability(_id: string): Promise<ServiceResult<CapabilityDefinition>> {
+    return { success: false, error: 'Use TemplateService.resolveSpec() instead' };
+  }
+
+  /** @deprecated Use writeProjectSpec() instead */
+  async upsertCapability(
+    definition: Partial<CapabilityDefinition> & { title: string; content: string; id?: string }
+  ): Promise<ServiceResult<CapabilityDefinition>> {
+    try {
+      const specsDir = this.getProjectSpecsDir();
+      if (!fs.existsSync(specsDir)) {
+        fs.mkdirSync(specsDir, { recursive: true });
+      }
+
+      const existing = await this.listProjectSpecs();
+      const existingIds = new Set((existing.data || []).map(s => s.id));
+      const baseId = definition.id || slugify(definition.title);
+      const id = definition.id || generateUniqueSlug(baseId, existingIds);
+
+      const spec: SpecDefinition = {
+        id,
+        type: 'spec',
+        scope: 'project',
+        version: 1,
+        tags: [],
+        content: definition.content
+      };
+
+      await this.writeProjectSpec(id, spec);
+
+      return {
+        success: true,
+        data: {
+          id,
+          title: definition.title,
+          content: definition.content,
+          created_at: definition.created_at || new Date().toISOString().split('T')[0]
+        }
+      };
+    } catch (error) {
+      return { success: false, error: String(error) };
+    }
+  }
+
+  // ==========================================================================
   // Helpers
   // ==========================================================================
 
@@ -266,26 +536,28 @@ export class FileService {
       throw new Error('No YAML frontmatter found');
     }
 
-    const frontmatter = yaml.parse(frontmatterMatch[1]) as Partial<Expert>;
+    const fm = yaml.parse(frontmatterMatch[1]) as Partial<Expert> & { capabilities?: string[] };
     return {
-      role: frontmatter.role || '',
-      slug: frontmatter.slug || '',
-      domain: frontmatter.domain || 'general',
-      backed_by: frontmatter.backed_by || 'claude',
-      cli: frontmatter.cli,
-      model: frontmatter.model,
-      fallback_cli: frontmatter.fallback_cli,
-      tier: frontmatter.tier || 'standard',
-      permission_mode: frontmatter.permission_mode || 'default',
-      memory: frontmatter.memory,
-      isolation: frontmatter.isolation,
-      phases: frontmatter.phases || [],
-      agent_profile: frontmatter.agent_profile,
-      default_platform: frontmatter.default_platform,
+      role: fm.role || '',
+      slug: fm.slug || '',
+      domain: fm.domain || 'general',
+      backed_by: fm.backed_by || 'claude',
+      cli: fm.cli,
+      model: fm.model,
+      fallback_cli: fm.fallback_cli,
+      tier: fm.tier || 'standard',
+      permission_mode: fm.permission_mode || 'default',
+      memory: fm.memory,
+      isolation: fm.isolation,
+      phases: fm.phases || [],
+      agent_profile: fm.agent_profile,
+      default_platform: fm.default_platform,
       persona: '',
-      capabilities: [],
-      constraints: [],
-      created_at: frontmatter.created_at || new Date().toISOString().split('T')[0]
+      // Backward compat: read 'specs' first, fall back to 'capabilities'
+      specs: fm.specs ?? fm.capabilities ?? [],
+      capabilities: fm.capabilities ?? [],
+      constraints: fm.constraints || [],
+      created_at: fm.created_at || new Date().toISOString().split('T')[0]
     };
   }
 
@@ -305,8 +577,17 @@ export class FileService {
       phases: expert.phases,
       agent_profile: expert.agent_profile,
       default_platform: expert.default_platform,
+      specs: expert.specs ?? [],
+      constraints: expert.constraints,
       created_at: expert.created_at
     };
+
+    // Remove undefined fields
+    Object.keys(frontmatter).forEach(k => {
+      if (frontmatter[k] === undefined || frontmatter[k] === null) {
+        delete frontmatter[k];
+      }
+    });
 
     let content = `---\n${yaml.stringify(frontmatter)}---\n\n`;
     content += `# ${expert.role}\n\n`;
@@ -323,15 +604,68 @@ export class FileService {
       content += '\n';
     }
 
-    if (expert.constraints && expert.constraints.length > 0) {
-      content += `## 제약\n\n`;
-      expert.constraints.forEach(con => {
-        content += `- ${con}\n`;
-      });
-      content += '\n';
-    }
-
     return content;
+  }
+
+  parseSpecMarkdown(content: string, defaultScope: 'user' | 'project' = 'user'): SpecDefinition {
+    const frontmatterMatch = content.match(/^---\n([\s\S]*?)\n---\n?/);
+    const fm = frontmatterMatch ? yaml.parse(frontmatterMatch[1]) as Partial<SpecDefinition> : {};
+    const body = frontmatterMatch ? content.slice(frontmatterMatch[0].length).trim() : content.trim();
+
+    return {
+      id: fm.id || '',
+      type: fm.type || 'spec',
+      scope: fm.scope || defaultScope,
+      version: fm.version || 1,
+      tags: fm.tags || [],
+      requires: fm.requires,
+      conflicts_with: fm.conflicts_with,
+      content: body
+    };
+  }
+
+  generateSpecMarkdown(spec: SpecDefinition): string {
+    const fm: Record<string, unknown> = {
+      id: spec.id,
+      type: spec.type,
+      scope: spec.scope,
+      version: spec.version,
+    };
+    if (spec.tags?.length) { fm['tags'] = spec.tags; }
+    if (spec.requires?.length) { fm['requires'] = spec.requires; }
+    if (spec.conflicts_with?.length) { fm['conflicts_with'] = spec.conflicts_with; }
+
+    return `---\n${yaml.stringify(fm)}---\n\n${spec.content.trim()}\n`;
+  }
+
+  private ensureProjectScope(content: string): string {
+    const frontmatterMatch = content.match(/^---\n([\s\S]*?)\n---/);
+    if (!frontmatterMatch) { return content; }
+
+    const fm = yaml.parse(frontmatterMatch[1]) as Record<string, unknown>;
+    fm['scope'] = 'project';
+
+    return content.replace(frontmatterMatch[0], `---\n${yaml.stringify(fm)}---`);
+  }
+
+  private copyDirRecursive(src: string, dest: string, collected: string[]): void {
+    const entries = fs.readdirSync(src, { withFileTypes: true });
+    for (const entry of entries) {
+      const srcPath = path.join(src, entry.name);
+      const destPath = path.join(dest, entry.name);
+
+      if (entry.isDirectory()) {
+        if (!fs.existsSync(destPath)) {
+          fs.mkdirSync(destPath, { recursive: true });
+        }
+        this.copyDirRecursive(srcPath, destPath, collected);
+      } else if (entry.name.endsWith('.md')) {
+        fs.copyFileSync(srcPath, destPath);
+        // Store relative path from templates root
+        const relPath = path.relative(this.getProjectTemplatesRoot(), srcPath);
+        collected.push(relPath);
+      }
+    }
   }
 }
 

@@ -21,8 +21,41 @@ export interface Expert {
     agent_profile?: string;
     default_platform?: string;
     persona?: string;
+    /** Module spec ID references (e.g. 'auth-jwt', 'crud') */
+    specs?: string[];
+    /** Free-text capability descriptions (legacy / persona detail) */
     capabilities?: string[];
     constraints?: string[];
+    created_at: string;
+}
+export type SpecType = 'spec' | 'base' | 'platform' | 'policy';
+export type SpecScope = 'user' | 'project';
+export interface SpecDefinition {
+    id: string;
+    type: SpecType;
+    scope: SpecScope;
+    version: number;
+    tags: string[];
+    requires?: string[];
+    conflicts_with?: string[];
+    /** Frontmatter-stripped body content */
+    content: string;
+}
+/** Result of scope resolution: project scope overrides user scope */
+export interface ResolvedSpec {
+    id: string;
+    /** The spec that will actually be used */
+    effective: SpecDefinition;
+    /** Set to 'project' when a project-scope spec shadows the user-scope one */
+    overridden_by?: 'project';
+    /** The shadowed user-scope spec (if overridden) */
+    shadowed?: SpecDefinition;
+}
+/** Deprecated: use SpecDefinition instead */
+export interface CapabilityDefinition {
+    id: string;
+    title: string;
+    content: string;
     created_at: string;
 }
 export type TeamType = 'upper' | 'lower';
@@ -69,7 +102,8 @@ export interface AgentDefinition {
     owner: string;
     version: number;
     base: string;
-    capabilities: string[];
+    /** Module spec ID references (renamed from capabilities) */
+    specs: string[];
     available_platforms: string[];
     default_policy?: string;
     default_agent?: string;
@@ -82,6 +116,18 @@ export interface DomainConfig {
     project_name: string;
     configured_at: string;
 }
+export interface RelayEvent {
+    event_type: string;
+    timestamp: string;
+    cwd: string;
+    payload: Record<string, unknown>;
+}
+export interface TemplateExportMeta {
+    exported_at: string;
+    source_project: string;
+    scope: 'project';
+    files: string[];
+}
 export interface ServiceResult<T> {
     success: boolean;
     data?: T;
@@ -92,7 +138,7 @@ export interface ValidationResult {
     errors: string[];
     warnings: string[];
 }
-export type TreeItemType = 'team' | 'expert' | 'agent' | 'module' | 'config';
+export type TreeItemType = 'team' | 'expert' | 'agent' | 'module' | 'config' | 'spec' | 'templates';
 export interface TreeItemData {
     type: TreeItemType;
     id: string;

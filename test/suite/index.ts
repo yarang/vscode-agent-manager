@@ -6,7 +6,7 @@
 
 import * as path from 'path';
 import * as Mocha from 'mocha';
-import * as vscode from 'vscode';
+import { glob } from 'glob';
 
 export async function run(): Promise<void> {
   // Create the mocha test
@@ -16,15 +16,18 @@ export async function run(): Promise<void> {
   });
 
   const testsRoot = path.join(__dirname, '.');
+  const testFiles = await glob('**/*.test.js', {
+    cwd: testsRoot,
+    absolute: true
+  });
 
   await new Promise<void>((resolve, reject) => {
-    mocha.addFile(path.join(testsRoot, 'extension.test.js'));
-    mocha.addFile(path.join(testsRoot, 'services/**/*.test.js'));
+    testFiles.sort().forEach(file => mocha.addFile(file));
 
     try {
       mocha.run(failures => {
         if (failures > 0) {
-          reject(new Error(\`\${failures} tests failed.\`));
+          reject(new Error(`${failures} tests failed.`));
         } else {
           resolve();
         }

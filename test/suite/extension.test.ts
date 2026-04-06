@@ -51,7 +51,7 @@ suite('Extension Test Suite', () => {
     ];
 
     for (const cmd of expectedCommands) {
-      assert.ok(commands.has(cmd), \`Command \${cmd} should be registered\`);
+      assert.ok(commands.has(cmd), `Command ${cmd} should be registered`);
     }
   });
 

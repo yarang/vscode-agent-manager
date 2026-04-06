@@ -573,6 +573,15 @@ export class TeamBuilderPanel {
         renderExpertList(filtered);
       }
 
+      function closeExpertPicker() {
+        expertSearch.value = '';
+        renderExpertList(availableExperts);
+
+        if (document.activeElement instanceof HTMLElement) {
+          document.activeElement.blur();
+        }
+      }
+
       function renderMemberList() {
         memberList.innerHTML = '';
         memberCount.textContent = \`(\${teamMembers.length})\`;
@@ -672,6 +681,7 @@ export class TeamBuilderPanel {
 
         if (teamMembers.some(m => m.expert_slug === slug)) {
           showStatus('Expert already in team', 'warning');
+          closeExpertPicker();
           return;
         }
 
@@ -686,11 +696,13 @@ export class TeamBuilderPanel {
         });
 
         renderMemberList();
+        closeExpertPicker();
         showStatus(\`Added \${expert.role} to team\`, 'info');
       }
 
       function showExpertDetails(slug) {
         selectedExpertSlug = slug;
+        closeExpertPicker();
         vscode.postMessage({ type: 'loadExpert', data: slug });
       }
 

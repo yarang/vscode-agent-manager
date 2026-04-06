@@ -105,6 +105,51 @@
         "command": "agentManager.openRelayFolder",
         "title": "Open Relay Folder",
         "icon": "$(folder-opened)"
+      },
+      {
+        "command": "agentManager.openSpecBrowser",
+        "title": "Agent Manager: Open Spec Browser",
+        "icon": "$(list-flat)"
+      },
+      {
+        "command": "agentManager.exportTemplates",
+        "title": "Agent Manager: Export Templates",
+        "icon": "$(export)"
+      },
+      {
+        "command": "agentManager.importTemplates",
+        "title": "Agent Manager: Import Templates",
+        "icon": "$(import)"
+      },
+      {
+        "command": "agentManager.showAgentActivity",
+        "title": "Agent Manager: Show Agent Activity",
+        "icon": "$(pulse)"
+      },
+      {
+        "command": "agentManager.forkSpec",
+        "title": "Fork to Project",
+        "icon": "$(repo-forked)"
+      },
+      {
+        "command": "agentManager.deleteProjectSpec",
+        "title": "Delete Spec",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "agentManager.editProjectSpec",
+        "title": "Edit Spec",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "agentManager.viewUserSpec",
+        "title": "View Spec",
+        "icon": "$(go-to-file)"
+      },
+      {
+        "command": "agentManager.diffSpec",
+        "title": "Diff with User Scope",
+        "icon": "$(diff)"
       }
     ],
     "viewsContainers": {
@@ -135,6 +180,16 @@
           "command": "agentManager.refreshTree",
           "when": "view == agentManager.treeView",
           "group": "navigation@2"
+        },
+        {
+          "command": "agentManager.openSpecBrowser",
+          "when": "view == agentManager.treeView",
+          "group": "navigation@3"
+        },
+        {
+          "command": "agentManager.showAgentActivity",
+          "when": "view == agentManager.treeView",
+          "group": "navigation@4"
         }
       ],
       "view/item/context": [
@@ -187,6 +242,46 @@
           "command": "agentManager.openRelayFolder",
           "when": "view == agentManager.treeView && viewItem == config",
           "group": "manage@1"
+        },
+        {
+          "command": "agentManager.exportTemplates",
+          "when": "view == agentManager.treeView && viewItem == templates",
+          "group": "inline@1"
+        },
+        {
+          "command": "agentManager.importTemplates",
+          "when": "view == agentManager.treeView && viewItem == templates",
+          "group": "inline@2"
+        },
+        {
+          "command": "agentManager.openSpecBrowser",
+          "when": "view == agentManager.treeView && viewItem == templates",
+          "group": "manage@1"
+        },
+        {
+          "command": "agentManager.forkSpec",
+          "when": "view == agentManager.treeView && viewItem == spec-user",
+          "group": "inline@1"
+        },
+        {
+          "command": "agentManager.viewUserSpec",
+          "when": "view == agentManager.treeView && viewItem == spec-user",
+          "group": "manage@1"
+        },
+        {
+          "command": "agentManager.editProjectSpec",
+          "when": "view == agentManager.treeView && viewItem == spec-project",
+          "group": "inline@1"
+        },
+        {
+          "command": "agentManager.diffSpec",
+          "when": "view == agentManager.treeView && viewItem == spec-project",
+          "group": "inline@2"
+        },
+        {
+          "command": "agentManager.deleteProjectSpec",
+          "when": "view == agentManager.treeView && viewItem == spec-project",
+          "group": "manage@1"
         }
       ]
     },
@@ -196,17 +291,29 @@
         "key": "ctrl+shift+a",
         "mac": "cmd+shift+a"
       }
-    ]
+    ],
+    "configuration": {
+      "title": "Agent Manager",
+      "properties": {
+        "agentManager.relayPluginPath": {
+          "type": "string",
+          "default": "",
+          "description": "Absolute path to the relay-plugin directory (user scope templates). Leave empty for auto-detection via installed_plugins.json or workspace-relative paths.",
+          "scope": "machine-overridable"
+        }
+      }
+    }
   },
   "scripts": {
     "vscode:prepublish": "npm run package",
     "compile": "webpack",
+    "test:compile": "tsc -p test/tsconfig.json",
     "watch": "webpack --watch",
     "package": "webpack --mode production --devtool hidden-source-map",
-    "test": "npm run compile && node ./node_modules/vscode/bin/test",
-    "test:unit": "npm run compile && mocha test/unit/**/*.test.js",
-    "test:e2e": "npm run compile && node ./node_modules/vscode/bin/test",
-    "test:coverage": "npm run compile && nyc mocha test/unit/**/*.test.js",
+    "test": "npm run compile && npm run test:compile && node ./out/test/runTest.js",
+    "test:unit": "npm run compile && npm run test:compile && node ./out/test/runTest.js",
+    "test:e2e": "npm run compile && npm run test:compile && node ./out/test/runTest.js",
+    "test:coverage": "npm run compile && npm run test:compile && nyc node ./out/test/runTest.js",
     "lint": "eslint src --ext ts",
     "lint:fix": "eslint src --ext ts --fix"
   },

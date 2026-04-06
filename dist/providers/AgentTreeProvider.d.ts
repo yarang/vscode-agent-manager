@@ -1,34 +1,34 @@
 /**
  * AgentTreeProvider - Tree view provider for Agent Manager sidebar
  *
- * Displays teams, experts, agents, and configuration in a hierarchical tree.
- * Enhanced with context menus, icons, and click handlers.
+ * Displays teams, experts, templates, and configuration in a hierarchical tree.
  */
 import * as vscode from 'vscode';
 import { FileService } from '../services/FileService';
+import { TemplateService } from '../services/TemplateService';
 export declare class AgentTreeProvider implements vscode.TreeDataProvider<TreeItem> {
     private fileService;
+    private templateService;
     private extensionContext?;
     private _onDidChangeTreeData;
-    readonly onDidChangeTreeData: vscode.Event<TreeItem | undefined | null | void>;
-    constructor(fileService: FileService, extensionContext?: vscode.ExtensionContext | undefined);
+    readonly onDidChangeTreeData: vscode.Event<void | TreeItem | null | undefined>;
+    constructor(fileService: FileService, templateService: TemplateService, extensionContext?: vscode.ExtensionContext | undefined);
     refresh(): void;
     getTreeItem(element: TreeItem): vscode.TreeItem;
     getChildren(element?: TreeItem): Promise<TreeItem[]>;
     private getRootItems;
     private getTeamItems;
     private getExpertItems;
-    private getModuleItems;
+    private getTemplateRootItems;
+    private getTypeSpecItems;
     private getConfigItems;
     private getTeamMembers;
     private getTeamTooltip;
     private getExpertTooltip;
+    private getSpecTooltip;
     private getMemberTooltip;
     private getExpertIcon;
 }
-/**
- * Custom TreeItem with extended metadata support
- */
 declare class TreeItem extends vscode.TreeItem {
     readonly label: string;
     readonly collapsibleState: vscode.TreeItemCollapsibleState;
@@ -40,7 +40,7 @@ declare class TreeItem extends vscode.TreeItem {
         name?: string;
         path?: string;
         key?: string;
-        description?: string;
+        type?: string;
         teamSlug?: string;
         expertSlug?: string;
     };
@@ -49,11 +49,7 @@ declare class TreeItem extends vscode.TreeItem {
         tooltip?: string;
         metadata?: TreeItem['metadata'];
     });
-    withDescription(desc: string): TreeItem;
 }
-/**
- * Register all tree item context menu commands
- */
-export declare function registerTreeCommands(context: vscode.ExtensionContext, fileService: FileService): void;
+export declare function registerTreeCommands(context: vscode.ExtensionContext, fileService: FileService, templateService: TemplateService): void;
 export {};
 //# sourceMappingURL=AgentTreeProvider.d.ts.map

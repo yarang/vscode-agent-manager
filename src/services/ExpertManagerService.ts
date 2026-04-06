@@ -436,6 +436,26 @@ export class ExpertManagerService {
     };
   }
 
+  getCapabilitySuggestions(): string[] {
+    const suggestions = new Set<string>();
+
+    this.templates.forEach(template => {
+      template.defaults.capabilities?.forEach(capability => {
+        const value = capability.trim();
+        if (value) {
+          suggestions.add(value);
+        }
+      });
+    });
+
+    return Array.from(suggestions).sort((a, b) => a.localeCompare(b));
+  }
+
+  /** @deprecated Spec modules are now managed via TemplateService specs */
+  async ensureDefaultCapabilities(): Promise<{ id: string; title: string; content: string; created_at: string }[]> {
+    return [];
+  }
+
   // ==========================================================================
   // Slug Generation
   // ==========================================================================

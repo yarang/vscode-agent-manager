@@ -93,7 +93,7 @@ created_at: 2026-01-01
 
     // Write the expert file directly
     const expertPath = path.join(relayRoot, 'experts', 'e2e-test-expert.md');
-    fs.writeFileSync(expertPath, \`---\\nrole: \${newExpertData.role}\\nslug: \${newExpertData.slug}\\n---\\n\`);
+    fs.writeFileSync(expertPath, `---\nrole: ${newExpertData.role}\nslug: ${newExpertData.slug}\n---\n`);
 
     // Verify file was created
     assert.ok(fs.existsSync(expertPath), 'Expert file should be created');

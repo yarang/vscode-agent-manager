@@ -247,8 +247,8 @@ suite('ValidationService Tests', () => {
 
     test('should warn about upper team size', () => {
       const manyMembers = Array(10).fill(null).map((_, i) => ({
-        role: \`Member \${i}\`,
-        expert_slug: \`member-\${i}\`,
+        role: `Member ${i}`,
+        expert_slug: `member-${i}`,
         tier: 'standard' as const,
         permission_mode: 'default' as const,
         is_leader: false,
@@ -267,8 +267,8 @@ suite('ValidationService Tests', () => {
 
     test('should warn about lower team size', () => {
       const manyMembers = Array(8).fill(null).map((_, i) => ({
-        role: \`Member \${i}\`,
-        expert_slug: \`member-\${i}\`,
+        role: `Member ${i}`,
+        expert_slug: `member-${i}`,
         tier: 'standard' as const,
         permission_mode: 'default' as const,
         is_leader: i === 0,

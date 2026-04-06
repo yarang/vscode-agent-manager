@@ -105,6 +105,14 @@ export declare class ExpertManagerService {
             readonly description: "Documentation and delivery";
         }];
     };
+    getCapabilitySuggestions(): string[];
+    /** @deprecated Spec modules are now managed via TemplateService specs */
+    ensureDefaultCapabilities(): Promise<{
+        id: string;
+        title: string;
+        content: string;
+        created_at: string;
+    }[]>;
     generateSlug(role: string): string;
     validateSlug(slug: string): {
         valid: boolean;
